@@ -149,12 +149,14 @@ async function createMongoStore(uri, dbName) {
       },
     },
     products: {
-      async vectorSearch(vector, k = 5) {
+      async vectorSearch(vector, k = 5, filter = null) {
         try {
           if (!Array.isArray(vector) || vector.length === 0) return null;
           const limit = Math.max(1, Math.min(Number(k) || 5, 100));
+          const stage = { index: 'products_vector', path: 'embedding', queryVector: vector, numCandidates: Math.max(limit * 10, 50), limit };
+          if (filter && typeof filter === 'object' && Object.keys(filter).length) stage.filter = filter; // pre-filter on indexed fields
           const docs = await col.products.aggregate([
-            { $vectorSearch: { index: 'products_vector', path: 'embedding', queryVector: vector, numCandidates: Math.max(limit * 10, 50), limit } },
+            { $vectorSearch: stage },
             { $addFields: { score: { $meta: 'vectorSearchScore' } } },
             { $project: { _id: 0, embedding: 0 } },
           ]).toArray();

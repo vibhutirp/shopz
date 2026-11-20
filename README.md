@@ -65,10 +65,10 @@ curl -s localhost:3000/api/chat -H 'content-type: application/json' \
 |---|---|---|
 | `AWS_REGION`, `AWS_PROFILE` (or the standard AWS credential chain) | Bedrock + Polly | deterministic answers, browser voice |
 | `BEDROCK_MODEL_ID` | Claude on Bedrock (Converse API): intent fallback, grounded page Q&A | regex router + keyword search on the page text |
-| `BEDROCK_EMBED_MODEL_ID` | Titan text embeddings for the catalog (`npm run seed`) | products stored without vectors |
+| `BEDROCK_EMBED_MODEL_ID` | Titan text embeddings (v2, 512 dims) for the catalog (`npm run seed`) and for each search query | products stored without vectors, search uses the store API only |
 | `POLLY_VOICE`, `POLLY_ENGINE` | Amazon Polly speech | `speechSynthesis` in the panel |
-| `NOVA_ACT_API_KEY`, `BROWSER_MODE=nova` | Amazon Nova Act drives the checkout | `BROWSER_MODE=playwright` (scripted clicks) |
-| `MONGODB_URI`, `MONGODB_DB` | MongoDB Atlas: audit events, preferences, orders, vector search | in-memory store + `data/audit-<session>.jsonl` |
+| `NOVA_ACT_API_KEY`, `BROWSER_MODE=nova` (the default in `.env.example`) | Amazon Nova Act owns the browser and runs the checkout steps with `act()` | Playwright with scripted clicks; `GET :4100/health` shows `mode` and `fallback_reason` |
+| `MONGODB_URI`, `MONGODB_DB` | MongoDB Atlas: audit events, preferences, orders, and Atlas Vector Search on every product search (after `npm run seed`) | in-memory store + `data/audit-<session>.jsonl`, store API search only |
 | `DEMO_TODAY=YYYY-MM-DD` | freezes "today" for delivery dates | real date |
 
 Never commit `.env`. It is gitignored.
@@ -91,6 +91,7 @@ Operator hotkeys in the panel (press `?`): `Shift+P` simulated price change on t
 - **Grounded answers.** Every answer comes from a page snapshot (section text + data attributes, sha256-hashed). With an LLM, the reply has to quote a span that is literally in the snapshot. If it doesn't, the answer becomes "the page doesn't say".
 - **Page content is data, not instructions.** Snapshot text is checked for injected instructions. Hits are logged as `injection_ignored`. Only user intents trigger actions.
 - **Spending policy** (`apps/agent/src/policy.js`): approved stores only, auto-buy up to $150 and 3 orders a day. Price increases since first seen, new stores or quantities above 2 need approval. Unapproved stores and out-of-stock items are denied. DENY always wins.
+- **Stores are the source of truth.** The agent searches each approved store's JSON API. With MongoDB configured, the same query also runs through Atlas Vector Search (`products_vector`, Titan v2 embeddings, pre-filtered by category). A semantic hit the store search missed becomes a candidate only after its store returns it live, so price, stock and delivery never come from the seeded copy. The `search_result` audit event lists `atlas_vector_search` with its hits and additions.
 - **Re-verify before paying.** Reload, read price and stock again, and say any difference out loud with both prices and timestamps.
 - **Explicit approval.** Only the exact phrase "confirm purchase" approves a purchase. "Yes" isn't enough.
 - **Audit trail.** Each event stores `hash = sha256(prev_hash + canonical JSON)`. `GET /api/audit/verify?session=` recomputes the chain, and the panel shows the result.

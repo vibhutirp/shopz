@@ -55,6 +55,10 @@ async function main() {
   log('prefs', 'seeded demo profile (labeled seeded_for_demo)');
   const merchants = merchantsFromEnv();
   log('merchants', merchants.map((m) => `${m.name} ${m.base}`).join(' · '));
+  const { createSemanticSearch } = await import('./src/semantic-search.js');
+  const { embedText } = await import('./src/embed.js');
+  const search = createSemanticSearch({ store, searchMerchants, embed: embedText });
+  log('search', search === searchMerchants ? 'store JSON API' : 'store JSON API + Atlas Vector Search (products_vector, Titan v2)');
   const browser = await createBrowser({ merchants });
   log('browser', `mode=${browser.mode}`);
   const llmConfigured = Boolean(process.env.BEDROCK_MODEL_ID && (process.env.AWS_PROFILE || process.env.AWS_ACCESS_KEY_ID || process.env.AWS_REGION));
@@ -63,7 +67,7 @@ async function main() {
   const llm = { complete: (args) => llmModule.complete(args) };
   const orchestrator = createOrchestrator({
     audit, prefs, store, browser, merchants, emit, llm,
-    searchMerchants, filterAndRank, evaluate, policy: DEFAULT_POLICY,
+    searchMerchants: search, filterAndRank, evaluate, policy: DEFAULT_POLICY,
   });
 
   // ---------------------------------------------------------------- helpers
