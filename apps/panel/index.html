@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Shopz – control panel</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <header class="hdr">
+      <div class="brand" aria-label="Shopz">Shop<span>z</span></div>
+      <div class="badge" title="All stores, products and ratings are fictional demo data. Preferences are pre-seeded.">Demo data: fictional stores, products and ratings · preferences pre-seeded</div>
+      <div class="hdr-right">
+        <span id="mutedTag" class="muted-tag" hidden>Muted</span>
+        <span id="conn" class="conn" title="Connecting…"></span>
+        <div id="micPill" class="pill pill-idle" role="status">
+          <span class="pill-dot"></span>
+          <span class="eq" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span id="micPillText">Idle</span>
+        </div>
+      </div>
+    </header>
+
+    <section class="card transcript" aria-label="Conversation">
+      <div id="turns" class="turns" aria-live="polite">
+        <div id="turnsEmpty" class="turns-empty">Hold <kbd>Space</kbd> and tell Shopz what you need.</div>
+      </div>
+      <div class="composer">
+        <button id="micBtn" class="mic-btn" type="button" tabindex="-1" aria-label="Hold to talk">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="8.5" y="2.5" width="7" height="12" rx="3.5"></rect>
+            <path d="M5 11a7 7 0 0 0 14 0M12 18v3.5"></path>
+          </svg>
+        </button>
+        <div id="micHint" class="composer-hint">Hold <kbd>Space</kbd> or the mic to talk</div>
+        <form id="textForm" class="text-form" autocomplete="off">
+          <input id="textInput" type="text" placeholder="…or type and press Enter" aria-label="Type a message" spellcheck="false">
+        </form>
+      </div>
+    </section>
+
+    <nav id="steps" class="steps" aria-label="Current step"></nav>
+
+    <section id="chips" class="chips" aria-label="Memory and constraints" hidden></section>
+
+    <section id="options" class="card options" aria-label="Options" hidden>
+      <div class="sec-head"><span>Options</span><span id="optionsMeta" class="sec-meta"></span></div>
+      <div id="optionRows"></div>
+    </section>
+
+    <section id="decision" class="decision" hidden>
+      <div id="policyCard" class="card policy" hidden></div>
+      <div id="priceCard" class="card price" hidden></div>
+      <div id="orderCard" class="card order" hidden></div>
+    </section>
+
+    <section class="card timeline" aria-label="Audit timeline">
+      <div class="sec-head"><span>Audit trail</span><span class="sec-meta">newest first · click a row for details</span></div>
+      <div id="tl" class="tl-list">
+        <div id="tlEmpty" class="tl-empty">Every page read, price seen, rule applied and word said lands here.</div>
+      </div>
+      <footer id="chain" class="chain unk"><span class="chain-main">Hash chain: checking…</span></footer>
+    </section>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <div id="help" class="help" hidden>
+    <div class="help-card">
+      <div class="help-title">Operator keys</div>
+      <dl>
+        <dt><kbd>Space</kbd> hold</dt><dd>Push to talk (stops the agent if it is speaking)</dd>
+        <dt><kbd>M</kbd></dt><dd>Mute / unmute the agent voice (flow continues)</dd>
+        <dt><kbd>Shift</kbd>+<kbd>P</kbd></dt><dd>Simulated price change on the first option (+$10)</dd>
+        <dt><kbd>Shift</kbd>+<kbd>R</kbd></dt><dd>Reset session and stores, then reload</dd>
+        <dt><kbd>Esc</kbd></dt><dd>Close this help / leave the text box</dd>
+        <dt><kbd>?</kbd></dt><dd>Toggle this help</dd>
+      </dl>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

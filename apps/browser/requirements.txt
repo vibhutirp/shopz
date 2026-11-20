@@ -1,0 +1,4 @@
+# Shopz browser controller. playwright alone is enough for BROWSER_MODE=playwright|headless.
+playwright>=1.49
+# BROWSER_MODE=nova (pulls a larger dependency set; needs NOVA_ACT_API_KEY)
+nova-act>=4.0.234,<5

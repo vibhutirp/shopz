@@ -1,0 +1,24 @@
+{
+  "name": "shopz",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shopz – a voice-first personal shopper that shows its work.",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=18.17" },
+  "scripts": {
+    "merchants": "node apps/merchants/server.js",
+    "agent": "node apps/agent/server.js",
+    "controller": "python3 apps/browser/controller.py",
+    "dev": "bash scripts/dev.sh",
+    "seed": "node scripts/seed.mjs",
+    "scenarios": "node scripts/scenarios-run.mjs",
+    "test": "node --test tests/*.test.js",
+    "publish-check": "bash scripts/publish-check.sh"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.700.0",
+    "@aws-sdk/client-polly": "^3.700.0",
+    "mongodb": "^6.10.0"
+  }
+}
