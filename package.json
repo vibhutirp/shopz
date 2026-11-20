@@ -4,7 +4,7 @@
   "private": true,
   "description": "Shopz – a voice-first personal shopper that shows its work.",
   "type": "module",
-  "license": "MIT",
+  "license": "UNLICENSED",
   "engines": { "node": ">=18.17" },
   "scripts": {
     "merchants": "node apps/merchants/server.js",

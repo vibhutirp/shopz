@@ -128,7 +128,3 @@ tests/             node:test suites
 - Built in one afternoon for a hackathon. The stores, catalog and payment are simulated, and no real money moves.
 - Voice input uses the browser's Web Speech API. Chrome works best.
 - The policy runs locally in the agent process. A production version would enforce it outside the agent, with scoped credentials for checkout.
-
-## License
-
-MIT – see [LICENSE](LICENSE).
