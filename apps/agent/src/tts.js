@@ -45,9 +45,35 @@ async function toBuffer(stream) {
   return null;
 }
 
+// Optional local Piper voice (male, en_US-ryan): set TTS_URL to a server with GET /tts?text= returning audio/wav.
+const LOCAL_TTS = process.env.TTS_URL || '';
+let localDownUntil = 0;
+async function synthesizeLocal(t) {
+  if (!LOCAL_TTS || LOCAL_TTS === 'off' || Date.now() < localDownUntil) return null;
+  const key = `piper|${t}`;
+  if (cache.has(key)) return cache.get(key);
+  try {
+    const r = await fetch(`${LOCAL_TTS}/tts?text=${encodeURIComponent(t.slice(0, 1500))}`, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+    if (!r.ok) throw new Error(`local tts ${r.status}`);
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (!buf.length) return null;
+    const out = { audio: buf, type: 'audio/wav' };
+    cache.set(key, out);
+    if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
+    return out;
+  } catch (err) {
+    warnOnce(err);
+    localDownUntil = Date.now() + 15000;
+    return null;
+  }
+}
+
 export async function synthesize(text) {
   const t = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, 2900);
-  if (!t || sdkMissing || Date.now() < cooldownUntil) return null;
+  if (!t) return null;
+  const local = await synthesizeLocal(t);
+  if (local) return local;
+  if (sdkMissing || Date.now() < cooldownUntil) return null;
   const voice = process.env.POLLY_VOICE || 'Matthew';
   const engine = process.env.POLLY_ENGINE || 'neural';
   const key = `${voice}|${engine}|${t}`;

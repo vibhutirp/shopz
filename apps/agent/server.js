@@ -38,7 +38,20 @@ async function main() {
 
   // ---------------------------------------------------------------- SSE hub
   const clients = new Map(); // session_id → Set<res>
+  // Polling fallback for proxies that buffer streams (e.g. Cloudflare quick tunnels): GET /api/poll.
+  const polls = new Map(); // session_id → { seq, events: [{ n, type, data }], waiters: Set<fn> }
+  function pollBox(session_id) {
+    let b = polls.get(session_id);
+    if (!b) { b = { seq: 0, events: [], waiters: new Set() }; polls.set(session_id, b); }
+    return b;
+  }
   function emit(session_id, type, data) {
+    const pb = polls.get(String(session_id));
+    if (pb) {
+      pb.events.push({ n: ++pb.seq, type, data: data ?? {} });
+      if (pb.events.length > 400) pb.events.splice(0, pb.events.length - 400);
+      for (const w of pb.waiters) w();
+    }
     const set = clients.get(String(session_id));
     if (!set || !set.size) return;
     const payload = `event: ${type}\ndata: ${JSON.stringify(data ?? {})}\n\n`;
@@ -63,7 +76,7 @@ async function main() {
   log('browser', `mode=${browser.mode}`);
   const llmConfigured = Boolean(process.env.BEDROCK_MODEL_ID && (process.env.AWS_PROFILE || process.env.AWS_ACCESS_KEY_ID || process.env.AWS_REGION));
   log('llm', `configured=${llmConfigured ? 'yes' : 'no'}${llmConfigured ? '' : ' (deterministic fallbacks only)'}`);
-  log('tts', `polly=${process.env.AWS_REGION ? 'try' : 'off'} (panel falls back to speechSynthesis on 503)`);
+  log('tts', `piper=${process.env.TTS_URL || 'off'} · polly=${process.env.AWS_REGION ? 'try' : 'off'} · panel falls back to speechSynthesis on 503`);
   const llm = { complete: (args) => llmModule.complete(args) };
   const orchestrator = createOrchestrator({
     audit, prefs, store, browser, merchants, emit, llm,
@@ -171,18 +184,50 @@ async function main() {
     if (req.method === 'GET' && p === '/api/health') {
       return send(res, 200, { ok: true, store: store.kind, browser: browser.mode, llm: llmConfigured });
     }
+    if (req.method === 'GET' && p === '/api/poll') {
+      const s = sid(q.get('session'));
+      if (!s) return send(res, 400, { error: 'session is required' });
+      const box = pollBox(s);
+      const since = Number(q.get('since'));
+      if (!Number.isFinite(since) || since < 0) {
+        const st = orchestrator.session(s);
+        return send(res, 200, { next: box.seq, events: [{ type: 'state', data: { state: st.state, option_index: st.option_index } }] }, { 'Cache-Control': 'no-store' });
+      }
+      const pick = () => box.events.filter((e) => e.n > since);
+      if (!pick().length) {
+        await new Promise((resolve) => {
+          const done = () => { clearTimeout(t); box.waiters.delete(done); resolve(); };
+          const t = setTimeout(done, 1200);
+          box.waiters.add(done);
+        });
+      }
+      const evs = pick();
+      return send(res, 200, { next: evs.length ? evs[evs.length - 1].n : Math.max(since, 0), events: evs.map((e) => ({ type: e.type, data: e.data })) }, { 'Cache-Control': 'no-store' });
+    }
     if (req.method === 'GET' && p === '/api/events') {
       const s = sid(q.get('session'));
       if (!s) return send(res, 400, { error: 'session is required' });
       return openEvents(req, res, s);
+    }
+    if (req.method === 'POST' && p === '/api/stt') {
+      const chunks = []; let size = 0;
+      for await (const c of req) { size += c.length; if (size > 15e6) return send(res, 413, { error: 'audio too large' }); chunks.push(c); }
+      if (!process.env.STT_URL) return send(res, 503, { error: 'speech recognition unavailable' });
+      try {
+        const r = await fetch(process.env.STT_URL + '/stt', { method: 'POST', body: Buffer.concat(chunks), headers: { 'content-type': req.headers['content-type'] || 'application/octet-stream' }, signal: AbortSignal.timeout(30000) });
+        const j = await r.json();
+        return send(res, r.ok ? 200 : 502, { text: String(j.text || ''), error: j.error });
+      } catch (e) { return send(res, 502, { error: 'speech recognition unavailable' }); }
     }
     if (req.method === 'GET' && p === '/api/tts') {
       const text = String(q.get('text') || '').slice(0, 1500);
       if (!text.trim()) return send(res, 400, { error: 'text is required' });
       const audio = await synthesize(text);
       if (!audio) return send(res, 503, { error: 'tts unavailable' });
-      res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': audio.length, 'Cache-Control': 'no-store' });
-      return res.end(audio);
+      const body = Buffer.isBuffer(audio) ? audio : audio.audio;
+      const ctype = Buffer.isBuffer(audio) ? 'audio/mpeg' : audio.type;
+      res.writeHead(200, { 'Content-Type': ctype, 'Content-Length': body.length, 'Cache-Control': 'no-store' });
+      return res.end(body);
     }
     if (req.method === 'GET' && p === '/api/audit') {
       const s = sid(q.get('session'));

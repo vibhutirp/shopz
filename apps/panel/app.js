@@ -410,7 +410,11 @@
     if (cachedVoice !== undefined) return cachedVoice;
     const vs = (window.speechSynthesis && speechSynthesis.getVoices()) || [];
     if (!vs.length) return null; // voices load async – try again next sentence
-    cachedVoice = vs.find((v) => /^en[-_]US$/i.test(v.lang) && v.default) || vs.find((v) => /^en[-_]US$/i.test(v.lang)) || null;
+    // Male voice first (server voice is male too): macOS/iOS, Windows, Chrome names.
+    const male = /\b(male|daniel|alex|aaron|fred|tom|evan|nathan|reed|rocko|ralph|guy|david|mark|christopher|eric|roger|andrew|brian|ryan|james|arthur|oliver|gordon)\b/i;
+    const en = vs.filter((v) => /^en[-_]/i.test(v.lang) && !/female/i.test(v.name));
+    cachedVoice = en.find((v) => /^en[-_]US$/i.test(v.lang) && male.test(v.name)) || en.find((v) => male.test(v.name))
+      || vs.find((v) => /^en[-_]US$/i.test(v.lang) && v.default) || vs.find((v) => /^en[-_]US$/i.test(v.lang)) || null;
     return cachedVoice;
   }
   function speakWithBrowser(it, begin, finish, pace) {
@@ -471,6 +475,43 @@
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition || null;
   const ptt = { active: false, src: null, press: null, bargedIn: false };
 
+  const UA = navigator.userAgent;
+  let serverStt = !SR || (/Safari/.test(UA) && !/Chrome|Chromium|CriOS|Edg|OPR|Firefox/.test(UA));
+  let micStream = null;
+  async function recorderStart(press) {
+    try {
+      if (!micStream || !micStream.active) micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      press.fatal = true;
+      toast('Microphone blocked – allow it for this page or type below', 'error');
+      return settlePress(press);
+    }
+    if (press.settled) return;
+    const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) || '';
+    let mr;
+    try { mr = new MediaRecorder(micStream, mime ? { mimeType: mime } : undefined); } catch { toast('Recording is not available – type below', 'error'); return settlePress(press); }
+    const chunks = [];
+    mr.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    mr.onstop = async () => {
+      const type = mr.mimeType || mime || 'audio/webm';
+      const blob = new Blob(chunks, { type });
+      if (blob.size < 2000 || press.settled) return settlePress(press);
+      showInterim('Transcribing…');
+      clearTimeout(press.timer);
+      press.timer = setTimeout(() => settlePress(press), 30000);
+      try {
+        const r = await fetch('/api/stt', { method: 'POST', headers: { 'Content-Type': type }, body: blob });
+        const j = await r.json();
+        press.final = String(j.text || '');
+        if (!r.ok) toast('Speech recognition failed – type below', 'error');
+      } catch { toast('Speech recognition failed – type below', 'error'); }
+      settlePress(press);
+    };
+    press.mr = mr;
+    mr.start();
+    if (!ptt.active || ptt.press !== press) { try { mr.stop(); } catch { /* ignore */ } }
+  }
+
   function micErrorText(code) {
     if (code === 'not-allowed' || code === 'service-not-allowed') return 'Microphone blocked – allow it for this page or type below';
     if (code === 'audio-capture') return 'No microphone found – type below';
@@ -507,6 +548,11 @@
     rec.onerror = (e) => {
       if (e.error === 'no-speech' || e.error === 'aborted') return;
       press.fatal = true;
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed' || e.error === 'network') {
+        serverStt = true;
+        toast('Switched to server speech recognition – hold the mic again', 'error');
+        return;
+      }
       toast(micErrorText(e.error), 'error');
     };
     rec.onend = () => {
@@ -550,7 +596,7 @@
       post('/api/barge-in', { session_id: SESSION });
     }
     setMicPill();
-    if (!SR) {
+    if (!serverStt && !SR) {
       toast('Voice input is not available in this browser – use the text box', 'error');
       return;
     }
@@ -560,7 +606,7 @@
     };
     ptt.press = press;
     showInterim('');
-    startRecognizer(press);
+    if (serverStt) recorderStart(press); else startRecognizer(press);
   }
 
   function pttEnd(src) {
@@ -570,6 +616,13 @@
     setMicPill();
     const press = ptt.press;
     if (press) {
+      if (press.mr) {
+        try { if (press.mr.state !== 'inactive') press.mr.stop(); } catch { /* ignore */ }
+        press.timer = setTimeout(() => settlePress(press), 30000);
+        runQueue();
+        return;
+      }
+      if (!press.rec && serverStt) { runQueue(); return; } // recorder still waiting for mic permission
       try { if (press.rec) press.rec.stop(); } catch { /* ignore */ }
       // Final results arrive just after stop(); onend settles the press, the timer is the safety net.
       press.timer = setTimeout(() => settlePress(press), 1600);
@@ -987,7 +1040,29 @@
     c.className = 'conn ' + state;
     c.title = state === 'live' ? 'Live' : 'Reconnecting…';
   }
+  const USE_POLL = /(^|[?&])poll=1/.test(location.search) || /\.trycloudflare\.com$/.test(location.hostname);
+  let pollSince = -1;
+  async function pollLoop() {
+    for (;;) {
+      try {
+        const r = await fetch('/api/poll?session=' + encodeURIComponent(SESSION) + '&since=' + pollSince, { cache: 'no-store' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const j = await r.json();
+        if (!wasLive) { retry = 0; wasLive = true; setConn('live'); backfillAudit(); refreshVerify(); }
+        pollSince = j.next;
+        for (const ev of j.events || []) {
+          const fn = HANDLERS[ev.type];
+          if (fn) { try { fn(ev.data || {}); } catch (err) { console.error('[panel] ' + ev.type, err); } }
+        }
+      } catch {
+        if (wasLive) { wasLive = false; toast('Connection to the agent lost – reconnecting…', 'error'); }
+        setConn('down');
+        await new Promise((res) => setTimeout(res, 1000));
+      }
+    }
+  }
   function connect() {
+    if (USE_POLL) { pollLoop(); return; }
     clearTimeout(retryTimer);
     if (es) { try { es.close(); } catch { /* ignore */ } }
     es = new EventSource('/api/events?session=' + encodeURIComponent(SESSION));
