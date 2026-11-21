@@ -529,3 +529,235 @@ test('under the limit → AUTO_APPROVE checkout; "Buy it again." reorders the la
   assert.equal(k.store.orders.all[1].items[0].sku, 'RH-STW-GL5-W');
   assert.ok(!k.browser.calls.some((c) => c[0] === 'open' && String(c[1]).includes('DC-MRW-HB-12')));
 });
+
+// ---------------------------------------------------------------- cart
+const SHOES_LINE = 'Added the Stridewell Glide 5 Wide. Your cart has 1 item, $141.16 with tax.';
+
+async function shoesPresented(k, sid) {
+  await k.orch.handle(sid, 'I need running shoes for a half marathon in three weeks.', { sync: true });
+  return k.orch.handle(sid, 'By next Friday.', { sync: true });
+}
+
+test('cart: add shoes + usual coffee, change quantity, check out over the limit → approval → two orders, chain intact', async () => {
+  const k = setup();
+  const sid = 'ses_cart';
+  const t = (text) => k.orch.handle(sid, text, { sync: true });
+  await shoesPresented(k, sid);
+
+  let r = await t('Add the first one to my cart.');
+  assert.deepEqual(r.replies, [SHOES_LINE]);
+  assert.equal(r.state, 'AWAIT_CHOICE');
+  r = await t('Put the coffee in the cart too.');
+  assert.deepEqual(r.replies, ['Added the Morrow House Blend. Your cart has 2 items, $161.15 with tax.']);
+  assert.ok(k.browser.calls.some((c) => c[0] === 'open' && c[1] === 'http://localhost:4002/p/DC-MRW-HB-12'), 'the coffee price is read on its page');
+  assert.equal(k.browser.currentUrl(), 'http://localhost:4001/p/RH-OND-CP-W', 'back on the page the user was looking at');
+  r = await t("What's in my cart?");
+  assert.deepEqual(r.replies, ['Your cart: 1 Stridewell Glide 5 Wide from RunHub and 1 Morrow House Blend from DailyCart. Total $161.15 with tax, free shipping.']);
+  assert.equal(k.sseOf('cart').at(-1).open, true);
+  r = await t('Make the coffee two.');
+  assert.deepEqual(r.replies, ['Now 2 of the Morrow House Blend. Your cart total is $181.13 with tax.']);
+
+  const view = k.sseOf('cart').at(-1).cart;
+  assert.equal(view.totals.item_count, 3);
+  assert.equal(view.totals.total, 181.13);
+  assert.deepEqual(view.totals.stores.map((x) => [x.store_name, x.item_count, x.subtotal, x.tax, x.total]), [['RunHub', 1, 129.95, 11.21, 141.16], ['DailyCart', 2, 36.8, 3.17, 39.97]]);
+  assert.deepEqual(view.lines.map((l) => [l.sku, l.qty, l.unit_price, l.source]), [['RH-STW-GL5-W', 1, 129.95, 'demo'], ['DC-MRW-HB-12', 2, 18.4, 'demo']]);
+  assert.ok(view.lines.every((l) => l.seen_at && l.url));
+
+  r = await t('Check out.');
+  assert.deepEqual(r.replies, [
+    "Checking out 3 items from RunHub and DailyCart. I'll re-check every page first.",
+    'Cart total is $181.13 with tax, free shipping.',
+    "That's over your $150 auto-buy limit.",
+    "Say 'confirm purchase' to place two orders.",
+  ]);
+  assert.equal(r.state, 'APPROVE');
+  assert.equal(k.store.orders.all.length, 0, 'nothing bought before the approval');
+  const pol = (await k.events(sid)).filter((e) => e.type === 'policy_decision').at(-1);
+  assert.equal(pol.data.scope, 'cart');
+  assert.equal(pol.data.decision, 'REQUIRE_APPROVAL');
+  assert.deepEqual(pol.data.rules, ['total_over_limit'], 'each line is under the limit on its own – the cart total is not');
+  assert.deepEqual(pol.data.lines.map((l) => l.decision), ['AUTO_APPROVE', 'AUTO_APPROVE']);
+  const card = k.sseOf('policy').at(-1);
+  assert.deepEqual([card.scope, card.total, card.total_as_added, card.limit], ['cart', 181.13, 181.13, 150]);
+
+  r = await t('Confirm purchase.');
+  assert.deepEqual(r.replies, ['Confirmed. Placing the orders.', 'Done. Orders RH-10482 arrives Tuesday and DC-20731 arrives Saturday. You paid $181.13 in total.']);
+  assert.equal(r.state, 'DONE');
+  assert.deepEqual(k.store.orders.all.map((o) => [o.order_id, o.items[0].qty, o.totals.total, o.approval.mode]), [['RH-10482', 1, 141.16, 'user_explicit'], ['DC-20731', 2, 39.97, 'user_explicit']]);
+  assert.equal(k.store.orders.all.reduce((s, o) => s + o.totals.total, 0).toFixed(2), '181.13', 'cart total = sum of the orders');
+  assert.deepEqual(k.browser.calls.filter((c) => c[0] === 'checkout').map((c) => [c[1], c[2]]), [['RH-STW-GL5-W', 1], ['DC-MRW-HB-12', 2]]);
+  assert.equal(k.sseOf('cart').at(-1).cart.lines.length, 0, 'cart is empty after checkout');
+  assert.deepEqual(k.sseOf('cart_order').at(-1).orders.map((o) => o.order_id), ['RH-10482', 'DC-20731']);
+  const types = await k.types(sid);
+  for (const [type, n] of [['cart_item_added', 2], ['cart_quantity_changed', 1], ['cart_checkout_started', 1], ['approval_requested', 1], ['approval_granted', 1], ['order_confirmed', 2], ['cart_checkout_done', 1]]) {
+    assert.equal(types.filter((x) => x === type).length, n, type);
+  }
+  assert.ok(types.indexOf('approval_granted') < types.indexOf('order_confirmed'), 'approval before any order');
+  const added = (await k.events(sid)).filter((e) => e.type === 'cart_item_added');
+  assert.deepEqual(added.map((e) => [e.data.sku, e.data.unit_price, e.data.price_source]), [['RH-STW-GL5-W', 129.95, 'product_page'], ['DC-MRW-HB-12', 18.4, 'product_page']]);
+  assert.match(added[1].data.snapshot_id, /^snap_/);
+  verifyChain(await k.events(sid));
+});
+
+test('cart: under the limit → AUTO_APPROVE, one order, without a search first', async () => {
+  const k = setup();
+  const sid = 'ses_cart_auto';
+  const t = (text) => k.orch.handle(sid, text, { sync: true });
+  let r = await t('Add the coffee to my cart.');
+  assert.deepEqual(r.replies, ['Added the Morrow House Blend. Your cart has 1 item, $19.99 with tax.']);
+  r = await t('Check out.');
+  assert.deepEqual(r.replies, [
+    "Checking out 1 item from DailyCart. I'll re-check every page first.",
+    'Cart total is $19.99 with tax, free shipping.',
+    "That's under your limit, so I'm placing one order now.",
+    'Done. Order DC-20731 arrives Saturday. You paid $19.99 in total.',
+  ]);
+  assert.equal((await k.events(sid)).filter((e) => e.type === 'policy_decision').at(-1).data.decision, 'AUTO_APPROVE');
+  assert.equal(await k.count(sid, 'approval_requested'), 0);
+  assert.equal(k.store.orders.all[0].approval.mode, 'auto');
+  verifyChain(await k.events(sid));
+});
+
+test('cart: price went up since it was added → approval with the old and the new total', async () => {
+  const k = setup();
+  const sid = 'ses_cart_price';
+  const t = (text) => k.orch.handle(sid, text, { sync: true });
+  await shoesPresented(k, sid);
+  await t('Add the first one to my cart.');
+  await t('Add the coffee to the cart.');
+  k.browser.bumpOnReload('RH-STW-GL5-W', { price: 139.95 });
+  const r = await t('Buy everything in my cart.');
+  assert.ok(r.replies.includes('The Stridewell Glide 5 Wide changed since you added it: $129.95 then, $139.95 now.'), r.replies.join(' | '));
+  assert.ok(r.replies.includes('Cart total is $172.01 with tax, free shipping, it was $161.15 when you added the items.'), r.replies.join(' | '));
+  assert.equal(r.state, 'APPROVE');
+  const card = k.sseOf('policy').at(-1);
+  assert.deepEqual([card.total_as_added, card.total], [161.15, 172.01]);
+  assert.deepEqual(card.rules, ['total_over_limit', 'price_increased_since_first_seen']);
+  assert.deepEqual(card.lines[0].rules, ['total_over_limit', 'price_increased_since_first_seen']);
+  assert.equal(k.sseOf('price_diff').at(-1).after, 139.95);
+  const seen = (await k.events(sid)).filter((e) => e.type === 'price_observed' && e.data.at === 'cart_verify');
+  assert.deepEqual(seen.map((e) => [e.data.previous_price, e.data.price, e.data.changed]), [[129.95, 139.95, true], [18.4, 18.4, false]]);
+  assert.equal(k.store.orders.all.length, 0);
+});
+
+test('cart: a change after the approval request cancels it – "confirm purchase" then buys nothing', async () => {
+  const k = setup();
+  const sid = 'ses_cart_change';
+  const t = (text) => k.orch.handle(sid, text, { sync: true });
+  await shoesPresented(k, sid);
+  await t('Add the first one to my cart.');
+  await t('Add two bags of coffee to my cart.');
+  let r = await t('Check out.');
+  assert.equal(r.state, 'APPROVE');
+  const line = k.orch.cart(sid).lines.find((l) => l.sku === 'DC-MRW-HB-12');
+  assert.equal(line.qty, 2);
+  const out = await k.orch.cartUpdate(sid, { op: 'qty', line_id: line.line_id, qty: 1 });
+  assert.equal(out.ok, true);
+  assert.equal(out.cart.totals.total, 161.15);
+  assert.equal(k.orch.session(sid).state, 'AWAIT_CHOICE');
+  const denied = (await k.events(sid)).filter((e) => e.type === 'approval_denied').at(-1);
+  assert.deepEqual([denied.data.reason, denied.data.scope], ['cart_changed', 'cart']);
+  const changed = (await k.events(sid)).filter((e) => e.type === 'cart_quantity_changed').at(-1);
+  assert.deepEqual([changed.actor, changed.data.via, changed.data.qty_before, changed.data.qty], ['user', 'panel', 2, 1]);
+  r = await t('Confirm purchase.');
+  assert.deepEqual(r.replies, ["There's nothing waiting for your approval right now."]);
+  assert.equal(k.store.orders.all.length, 0);
+  verifyChain(await k.events(sid));
+});
+
+test('cart: remove by name, panel remove, empty cart, unknown item', async () => {
+  const k = setup();
+  const sid = 'ses_cart_remove';
+  const t = (text) => k.orch.handle(sid, text, { sync: true });
+  await shoesPresented(k, sid);
+  await t('Add the first one to my cart.');
+  await t('Add the Kestrel to my cart.');
+  await t('Put the coffee in the cart too.');
+  assert.deepEqual(k.orch.cart(sid).lines.map((l) => l.sku), ['RH-STW-GL5-W', 'DC-KST-TP2-W', 'DC-MRW-HB-12']);
+  let r = await t('Remove the Stridewell.');
+  assert.deepEqual(r.replies, ['Removed the Stridewell Glide 5 Wide. Your cart has 2 items, $149.25 with tax.']);
+  r = await t('Remove the shoes from my cart.');
+  assert.deepEqual(r.replies, ['Removed the Kestrel Tempo 2 Wide. Your cart has 1 item, $19.99 with tax.']);
+  r = await t('Remove the shoes.');
+  assert.match(r.replies[0], /^I don't see that in your cart\. Your cart: 1 Morrow House Blend from DailyCart\./);
+  const line = k.orch.cart(sid).lines[0];
+  const out = await k.orch.cartUpdate(sid, { op: 'remove', line_id: line.line_id });
+  assert.equal(out.cart.lines.length, 0);
+  assert.equal((await k.orch.cartUpdate(sid, { op: 'remove', line_id: 'line_999' })).ok, false);
+  r = await t('Check out my cart.');
+  assert.deepEqual(r.replies, ['Your cart is empty. Add something first.']);
+  assert.equal(await k.count(sid, 'cart_item_removed'), 3);
+  verifyChain(await k.events(sid));
+});
+
+test('cart: an item out of stock at checkout → DENY, nothing bought, cart kept', async () => {
+  const k = setup();
+  const sid = 'ses_cart_oos';
+  const t = (text) => k.orch.handle(sid, text, { sync: true });
+  await t('Add the coffee to my cart.');
+  k.browser.bumpOnReload('DC-MRW-HB-12', { in_stock: false });
+  const r = await t('Check out.');
+  assert.ok(r.replies.includes("The Morrow House Blend is out of stock now, so I can't check out. Remove it and I'll try again."), r.replies.join(' | '));
+  assert.equal((await k.events(sid)).filter((e) => e.type === 'policy_decision').at(-1).data.decision, 'DENY');
+  assert.equal(k.store.orders.all.length, 0);
+  assert.equal(k.orch.cart(sid).lines.length, 1);
+});
+
+test('cart: each line is one order – the daily order limit counts all of them', async () => {
+  for (const [before, expect] of [[0, 'AUTO_APPROVE'], [1, 'AUTO_APPROVE'], [2, 'REQUIRE_APPROVAL']]) {
+    const k = setup();
+    const sid = `ses_cart_daily_${before}`;
+    const t = (text) => k.orch.handle(sid, text, { sync: true });
+    for (let i = 0; i < before; i += 1) k.store.orders.all.push({ order_id: `X-${i}` });
+    await shoesPresented(k, sid);
+    await t('Add the second one to my cart.'); // Kestrel $119 → $129.26
+    await t('Add the coffee to my cart.'); // $19.99 → cart $149.25, under the $150 limit
+    const r = await t('Check out.');
+    const pol = (await k.events(sid)).filter((e) => e.type === 'policy_decision').at(-1);
+    assert.equal(pol.data.total, 149.25);
+    assert.equal(pol.data.decision, expect, `orders before: ${before}`);
+    assert.equal(pol.data.inputs.orders_today_counted, before + 1);
+    if (expect === 'REQUIRE_APPROVAL') {
+      assert.deepEqual(pol.data.rules, ['daily_order_limit']);
+      assert.equal(r.state, 'APPROVE');
+      assert.ok(r.replies.includes("That would go past today's order limit, so I need your OK."));
+    } else {
+      assert.equal(r.state, 'DONE');
+      assert.equal(k.store.orders.all.length, before + 2);
+    }
+  }
+});
+
+test('cart: the direct "buy this" path stays unchanged while the cart holds items', async () => {
+  const k = setup();
+  const sid = 'ses_cart_direct';
+  const t = (text) => k.orch.handle(sid, text, { sync: true });
+  await shoesPresented(k, sid);
+  await t('Add the coffee to my cart.');
+  k.browser.bumpOnReload('RH-STW-GL5-W', { price: 139.95 });
+  let r = await t('Go back to the first one. Buy that.');
+  assert.deepEqual(r.replies, BUY_LINES);
+  r = await t('confirm purchase');
+  assert.deepEqual(r.replies, ['Confirmed. Placing the order.', 'Done. Order RH-10482 arrives Tuesday.']);
+  assert.equal(k.store.orders.all.length, 1);
+  assert.equal(k.orch.cart(sid).lines.length, 1, 'the cart is untouched by a direct purchase');
+});
+
+test('cart: the whole-cart rule uses the re-checked prices – a rise that pushes the cart over the limit needs an OK', async () => {
+  const k = setup();
+  const sid = 'ses_cart_rise_over';
+  const t = (text) => k.orch.handle(sid, text, { sync: true });
+  await shoesPresented(k, sid);
+  await t('Add the second one to my cart.'); // Kestrel $129.26 with tax
+  await t('Add the coffee to my cart.'); // $19.99 → $149.25 as added, under the limit
+  k.browser.bumpOnReload('DC-MRW-HB-12', { price: 20.4 }); // $22.16 with tax → $151.42, no single line over the limit
+  const r = await t('Check out.');
+  assert.equal(r.state, 'APPROVE');
+  const card = k.sseOf('policy').at(-1);
+  assert.deepEqual([card.total_as_added, card.total], [149.25, 151.42]);
+  assert.ok(card.rules.includes('total_over_limit'), card.rules.join(','));
+  assert.ok(card.lines.every((l) => !l.rules.includes('total_over_limit')), 'only the cart as a whole is over the limit');
+  assert.equal(k.store.orders.all.length, 0);
+});
+

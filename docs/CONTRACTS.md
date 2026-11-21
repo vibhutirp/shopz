@@ -84,6 +84,8 @@ Errors: HTTP 4xx/5xx with `{error}`.
 - `POST /api/speech-done {session_id, say_id}` → `{ok}` (panel finished the last queued sentence → agent may auto-advance)
 - `GET /api/tts?text=` → `audio/mpeg` (Amazon Polly) or `503` → panel falls back to `speechSynthesis`
 - `GET /api/audit?session=S` → `{events: AuditEvent[]}` · `GET /api/audit/verify?session=S` → `{ok, count, head_hash}`
+- `GET /api/cart?session=S` → `{cart: CartView}` (live mode: `{cart: null, live: true}`)
+- `POST /api/cart {session_id, op: "qty"|"remove", line_id, qty?}` → `{ok, cart: CartView}` – panel stepper / remove; goes through the session queue and writes `cart_quantity_changed` / `cart_item_removed` (actor `user`). Live mode → `409`.
 - `POST /api/admin/price-bump {session_id}` → simulated +$10 on the first presented option (operator hotkey)
 - `POST /api/admin/reset {session_id}` → reset session + merchants
 
@@ -97,9 +99,11 @@ Errors: HTTP 4xx/5xx with `{error}`.
 | `memory` | `{chips:[{label, source:"seeded profile"\|"learned"}]}` |
 | `constraints` | `{chips:[{label}]}` |
 | `options` | `{options: ProductOption[]}` |
-| `policy` | `{decision, rules, inputs, total, currency}` |
+| `policy` | `{decision, rules, inputs, total, currency}` – cart checkout adds `scope: "cart"`, `total_as_added`, `lines[]` (price added/now, stock, per-line decision) and `stores[]` |
 | `price_diff` | `{sku, title, before, after, before_ts, after_ts}` |
 | `order` | `{order: Order}` |
+| `cart` | `{cart: CartView, change?: "added"\|"removed"\|"quantity"\|"checkout", line_id?, added?, open?}` – `open: true` after "what's in my cart?" |
+| `cart_order` | `{orders: Order[], total, currency, approval_mode, failed: {line_id, title}\|null}` – one demo order per cart line |
 | `audit` | `{event: AuditEvent}` |
 | `error` | `{message}` |
 
@@ -123,3 +127,11 @@ Errors: HTTP 4xx/5xx with `{error}`.
 `hash = sha256(prev_hash + canonicalJson(event without "hash"))`, first `prev_hash` = 64 × "0". canonicalJson = keys sorted recursively, no whitespace.
 
 **Order** `{ order_id, session_id, user_id, merchant_id, items:[{sku,title,qty,unit_price}], totals:{subtotal,tax,shipping,total,currency}, delivery_eta, return_policy, price_change:{first_seen,at_checkout,disclosed_to_user}, policy_decision_event_id, approval:{mode:"auto"|"user_explicit", channel, transcript, event_id}, executor, demo_data:true, status, placed_at, audit_head_hash }`
+
+### Cart (agent-side, demo stores)
+- One cart per session (`apps/agent/src/cart.js`, pure). Line: `{line_id, sku, title, brand, category, merchant_id, store_name, url, image_url, unit_price, currency, seen_at, snapshot_id, first_seen_price, shipping_cost, source: "demo"|"external", qty (1–10), added_at}`. `unit_price` is the price **as seen** at `seen_at`.
+- `CartView = {lines: [line + line_total], totals: {stores: [{merchant_id, store_name, line_ids, item_count, subtotal, tax, shipping, total}], item_count, line_count, external_count, subtotal, tax, shipping, total, currency, tax_rate}, updated_at}`. Each demo line is totalled like one store order (`computeTotals(unit_price, qty, shipping)`), so the cart total is the exact sum of the orders it becomes.
+- `source: "external"` lines (real stores, price comparison) are listed but never totalled or checked out – the panel shows **Open at store**.
+- Intents: `cart_add` ("add this / the coffee / the second one to my cart"), `cart_show` ("what's in my cart?"), `cart_remove` ("remove the shoes"), `cart_qty` ("make it two coffees"), `cart_checkout` ("check out", "buy everything").
+- Checkout: every line is reloaded (price, stock); the policy runs **per line and once for the whole cart** (cart total, orders today + orders to place − 1, largest quantity). Rules are the union, any DENY wins. A pending cart approval is bound to the cart's content; any change cancels it (`approval_denied` reason `cart_changed`). Then one checkout per line.
+- Audit types: `cart_item_added`, `cart_item_removed`, `cart_quantity_changed`, `cart_checkout_started`, `cart_checkout_done` (plus the usual `page_reload`, `price_observed`, `stock_checked`, `policy_decision {scope: "cart"}`, `approval_*`, `checkout_*`, `order_confirmed`).

@@ -88,6 +88,8 @@ Never commit `.env`. It is gitignored.
 7. "Confirm purchase." → checkout in the browser → *"Done. Order RH-10482 arrives Tuesday."*
 8. "Reorder my usual coffee." → under the limit at an approved store → bought without asking.
 
+**Cart (optional, after the script):** "Add the first one to my cart." → "Put the coffee in the cart too." → "What's in my cart?" (the cart opens with both stores, quantities, subtotal per store and the grand total) → "Check out." Shopz re-checks every page and runs your rules on each line *and* on the cart total; over $150 or after a price rise it shows the old and the new total and waits for "confirm purchase". Every cart change is in the audit chain.
+
 Operator hotkeys in the panel (press `?`): `Shift+P` simulated price change on the first pick, `Shift+R` reset, `M` mute.
 
 ## Live mode (real stores)
@@ -108,7 +110,7 @@ Switch the header to **Live web** (or open `/?mode=live`). Shopz then searches r
 - **Stores are the source of truth.** The agent searches each approved store's JSON API. With MongoDB configured, the same query also runs through Atlas Vector Search (`products_vector`, Titan v2 embeddings, pre-filtered by category). A semantic hit the store search missed becomes a candidate only after its store returns it live, so price, stock and delivery never come from the seeded copy. The `search_result` audit event lists `atlas_vector_search` with its hits and additions.
 - **Re-verify before paying.** Reload, read price and stock again, and say any difference out loud with both prices and timestamps.
 - **Explicit approval.** Only the exact phrase "confirm purchase" approves a purchase. "Yes" isn't enough.
-- **Audit trail.** Each event stores `hash = sha256(prev_hash + canonical JSON)`. `GET /api/audit/verify?session=` recomputes the chain, and the panel shows the result.
+- **Audit trail.** Each event stores `hash = sha256(prev_hash + canonical JSON)`. `GET /api/audit/verify?session=` recomputes the chain. The panel shows it as a readable timeline (one story per request: understand → search → compare → check → your rules → buy), with rule decisions and price changes highlighted. **Verify again** recomputes every hash on the server and, over https, in the browser too; **Export JSON** downloads the raw chain. Hashes and raw events sit behind each entry.
 
 ## Testing
 

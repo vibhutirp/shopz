@@ -278,6 +278,12 @@ async function main() {
       const v = await audit.verify(s);
       return send(res, 200, v);
     }
+    if (req.method === 'GET' && p === '/api/cart') {
+      const s = sid(q.get('session'));
+      if (!s) return send(res, 400, { error: 'session is required' });
+      if (modeOf(s) === 'live') return send(res, 200, { cart: null, live: true });
+      return send(res, 200, { cart: orchestrator.cart(s) });
+    }
     if (req.method !== 'POST') return send(res, 404, { error: 'not found' });
 
     const body = await readBody(req);
@@ -322,6 +328,14 @@ async function main() {
         const s = sid(body.session_id) || newSessionId();
         const out = await orch(s, body.mode).handle(s, text, { sync: true });
         return send(res, 200, { session_id: s, reply: out.replies.join(' ') });
+      }
+      case '/api/cart': {
+        // Panel cart view: quantity stepper and remove. Goes through the session queue and the audit chain.
+        const s = sid(body.session_id);
+        if (!s) return send(res, 400, { error: 'session_id is required' });
+        if (modeOf(s) === 'live') return send(res, 409, { error: 'the cart is only for the demo stores' });
+        const out = await orchestrator.cartUpdate(s, { op: body.op, line_id: body.line_id, qty: body.qty });
+        return send(res, out.ok ? 200 : 400, out);
       }
       case '/api/admin/price-bump': {
         // Operator hotkey: simulated +$10 on the first presented option. Not part of the user's audit trail.

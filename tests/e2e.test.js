@@ -220,3 +220,49 @@ test('panel card art: every option sku has an inline svg, unknown sku is 404', a
   const bad = await fetch(`${AGENT}/api/art/NOPE-1?view=side`);
   assert.equal(bad.status, 404);
 });
+
+test('cart end to end: real stores, quantity from the panel API, approval, one order per line with that quantity', async () => {
+  const S = 'e2e_cart';
+  await post('/api/admin/reset', { session_id: S });
+  await say(S, 'I need running shoes for a half marathon in three weeks.');
+  let r = await say(S, 'By next Friday.');
+  assert.equal(r.state, 'AWAIT_CHOICE');
+
+  r = await say(S, 'Add the first one to my cart.');
+  assert.match(r.said, /^Added the Stridewell Glide 5 Wide\. Your cart has 1 item, \$141\.16 with tax\.$/);
+  r = await say(S, 'Put the coffee in the cart too.');
+  assert.match(r.said, /Added the Morrow House Blend\. Your cart has 2 items, \$161\.15 with tax\./);
+  let cart = (await get(`/api/cart?session=${S}`)).cart;
+  assert.deepEqual(cart.lines.map((l) => [l.sku, l.qty, l.unit_price]), [['RH-STW-GL5-W', 1, 129.95], ['DC-MRW-HB-12', 1, 18.4]]);
+  const coffee = cart.lines[1];
+  const upd = await post('/api/cart', { session_id: S, op: 'qty', line_id: coffee.line_id, qty: 2 });
+  assert.equal(upd.cart.totals.total, 181.13);
+  const bad = await fetch(AGENT + '/api/cart', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session_id: S, op: 'explode', line_id: coffee.line_id }) });
+  assert.equal(bad.status, 400);
+
+  r = await say(S, "What's in my cart?");
+  assert.match(r.said, /1 Stridewell Glide 5 Wide from RunHub and 2 Morrow House Blend from DailyCart\. Total \$181\.13 with tax/);
+  r = await say(S, 'Check out.');
+  assert.equal(r.state, 'APPROVE');
+  assert.match(norm(r.said), /Cart total is \$181\.13 with tax/);
+  assert.match(norm(r.said), /Say 'confirm purchase' to place two orders\./);
+  const pol = r.events.find((e) => e.type === 'policy_decision');
+  assert.equal(pol.data.scope, 'cart');
+  assert.ok(pol.data.rules.includes('total_over_limit'));
+
+  r = await say(S, 'Confirm purchase.');
+  assert.equal(r.state, 'DONE');
+  const ids = [...r.said.matchAll(/\b(RH-\d+|DC-\d+)\b/g)].map((m) => m[1]);
+  assert.equal(ids.length, 2, r.said);
+  const done = r.events.find((e) => e.type === 'cart_checkout_done');
+  assert.equal(done.data.total, 181.13);
+  // the stores really hold one order per line, with the cart quantity
+  const dc = await (await fetch(`http://127.0.0.1:${PORTS.dailycart}/api/orders/${ids[1]}`)).json();
+  assert.deepEqual([dc.items[0].sku, dc.items[0].qty, dc.totals.total], ['DC-MRW-HB-12', 2, 39.97]);
+  const rh = await (await fetch(`http://127.0.0.1:${PORTS.runhub}/api/orders/${ids[0]}`)).json();
+  assert.deepEqual([rh.items[0].sku, rh.items[0].qty, rh.totals.total], ['RH-STW-GL5-W', 1, 141.16]);
+  cart = (await get(`/api/cart?session=${S}`)).cart;
+  assert.equal(cart.lines.length, 0);
+  const v = await get(`/api/audit/verify?session=${S}`);
+  assert.equal(v.ok, true);
+});

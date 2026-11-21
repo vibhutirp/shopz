@@ -19,6 +19,7 @@ export const STATES = Object.freeze([
 
 export const INTENTS = Object.freeze([
   'request', 'answer_clarify', 'next', 'back', 'goto_option', 'show_section', 'ask', 'select', 'confirm', 'cancel', 'reorder', 'alternative',
+  'cart_add', 'cart_remove', 'cart_qty', 'cart_show', 'cart_checkout',
 ]);
 
 export const AUDIT_TYPES = Object.freeze([
@@ -29,10 +30,12 @@ export const AUDIT_TYPES = Object.freeze([
   'order_confirmed', 'error', 'fallback_used',
   // live web mode: optional web search, and the hand-off to the store's own checkout (never an order by Shopz)
   'web_search', 'handoff',
+  // cart: every change and the checkout of the whole cart are part of the chain
+  'cart_item_added', 'cart_item_removed', 'cart_quantity_changed', 'cart_checkout_started', 'cart_checkout_done',
 ]);
 
 export const SSE_TYPES = Object.freeze([
-  'state', 'user.utterance', 'agent.say', 'speech.cancel', 'memory', 'constraints', 'options', 'policy', 'price_diff', 'order', 'audit', 'error', 'handoff',
+  'state', 'user.utterance', 'agent.say', 'speech.cancel', 'memory', 'constraints', 'options', 'policy', 'price_diff', 'order', 'audit', 'error', 'handoff', 'cart', 'cart_order',
 ]);
 
 export const POLICY_DECISIONS = Object.freeze(['AUTO_APPROVE', 'REQUIRE_APPROVAL', 'DENY']);

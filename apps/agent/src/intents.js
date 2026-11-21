@@ -178,10 +178,70 @@ function matchGoto(n, ctx) {
   return null;
 }
 
+// ---------------------------------------------------------------- cart
+const QTY_WORD = { a: 1, an: 1, one: 1, another: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, couple: 2, pair: 1 };
+const QTY_RE = /^(?:(\d{1,2})|(a|an|one|another|two|three|four|five|six|seven|eight|nine|ten))\b\s*(?:more\s+)?(?:of\s+)?/;
+const CART_WORD = /\b(?:cart|basket|bag)\b/;
+const CART_NOUN = '(?:shopping\\s+)?(?:cart|basket)';
+const CART_SHOW = new RegExp(`^(?:(?:can you |could you |please )?(?:show|open|view|see|check|let me see|pull up|bring up)\\s+(?:me\\s+)?(?:my|the)\\s+${CART_NOUN}|(?:what'?s|whats|what is|what do i have|what have i got)\\s+in\\s+(?:my|the)\\s+${CART_NOUN}|(?:my|the)\\s+${CART_NOUN}|${CART_NOUN}|(?:how much is|what'?s|whats|what is)\\s+(?:my|the)\\s+${CART_NOUN}(?:\\s+total)?(?:\\s+in total)?|(?:my\\s+|the\\s+)?${CART_NOUN}\\s+total)(?:\\s+(?:right now|so far|now))?$`);
+const CART_CHECKOUT_ANY = new RegExp(`^(?:(?:i'?d like to|i want to|let'?s|lets|go ahead and|please|can you|could you)\\s+)*(?:check ?out|checkout|buy|purchase|order|pay for|get)\\s+(?:(?:everything|all|it all|all of it|all of them|all items|all the items|the items)(?:\\s+in\\s+(?:my|the)\\s+${CART_NOUN})?|(?:my|the)\\s+(?:whole\\s+)?${CART_NOUN}|what'?s in (?:my|the) ${CART_NOUN}|everything i (?:added|have))(?:\\s+now)?$`);
+const CART_CHECKOUT_BARE = /^(?:(?:i'?d like to|i want to|let'?s|lets|go ahead and|please|ok|okay|then)\s+)*(?:check ?out|checkout|place (?:the|my) order|proceed to checkout|go to checkout)(?:\s+now)?$/;
+const CART_ADD = new RegExp(`^(?:(?:can you|could you|please|also|and|then|i'?d like to|i want to|let'?s|lets|go ahead and)\\s+)*(?:add|put|throw|toss|stick|pop)\\s+(.*?)\\s*(?:(?:in|into|to|onto)\\s+(?:my|the)\\s+${CART_NOUN})?(?:\\s+(?:too|as well|also|please))*$`);
+const CART_ADD_BARE = /^(?:(?:please|also)\s+)?add (?:it |this |that |this one |that one )?to (?:the |my )?cart$|^add to cart$/;
+const CART_CLEAR = new RegExp(`^(?:(?:please|can you|could you)\\s+)?(?:empty|clear|reset)\\s+(?:my|the)\\s+${CART_NOUN}$|^(?:remove|delete|take out)\\s+everything(?:\\s+from\\s+(?:my|the)\\s+${CART_NOUN})?$`);
+const CART_REMOVE = new RegExp(`^(?:(?:please|can you|could you|actually)\\s+)*(?:remove|delete|drop|take)\\s+(.+?)(?:\\s+(?:from|out of|off)\\s+(?:my|the)\\s+${CART_NOUN}|\\s+out(?:\\s+of\\s+(?:my|the)\\s+${CART_NOUN})?)?$`);
+const CART_QTY = /^(?:(?:please|can you|could you|actually)\s+)*(?:make|change|set|update|turn)\s+(.*?)\s*(?:to|into)?\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\b(.*)$/;
+
+const qtyOf = (w) => (/^\d+$/.test(w) ? Number(w) : QTY_WORD[w] ?? null);
+
+/** "two of these" → { qty: 2, rest: 'these' }; "the coffee" → { qty: 1, rest: 'the coffee' }. */
+function splitQty(text) {
+  const t = String(text || '').trim();
+  const m = t.match(QTY_RE);
+  if (!m) return { qty: 1, rest: t };
+  const q = m[1] ? Number(m[1]) : qtyOf(m[2]);
+  const rest = t.slice(m[0].length).trim();
+  // "one" on its own is a pronoun ("add that one"), not a quantity
+  if (!rest && (m[2] === 'one' || m[2] === 'a' || m[2] === 'an')) return { qty: 1, rest: t };
+  return { qty: q || 1, rest };
+}
+
+/** Cart commands. ctx.cartCount = lines in the cart (bare "check out" / "remove the shoes" only mean the cart then). */
+export function matchCart(n, ctx = {}) {
+  const lines = Number(ctx.cartCount) || 0;
+  if (!n) return null;
+  if (CART_SHOW.test(n)) return { intent: 'cart_show', args: {} };
+  if (CART_CHECKOUT_ANY.test(n)) return { intent: 'cart_checkout', args: {} };
+  if (lines > 0 && CART_CHECKOUT_BARE.test(n)) return { intent: 'cart_checkout', args: {} };
+  if (CART_CLEAR.test(n)) return { intent: 'cart_remove', args: { all: true } };
+  if (CART_ADD_BARE.test(n)) return { intent: 'cart_add', args: { target: 'this', qty: 1 } };
+  let m = n.match(CART_ADD);
+  if (m && (CART_WORD.test(n) || /^(?:(?:please|also|and|then)\s+)*add\b/.test(n))) {
+    const { qty, rest } = splitQty(m[1].replace(/\b(?:too|as well|also)\b/g, '').trim());
+    return { intent: 'cart_add', args: { target: rest || 'this', qty } };
+  }
+  m = n.match(CART_REMOVE);
+  // "remove …" can only mean the cart here; "take … out" needs a cart word or a non-empty cart ("take the first one" picks).
+  if (m && (CART_WORD.test(n) || /^(?:(?:please|can you|could you|actually)\s+)*(?:remove|delete)\b/.test(n) || (lines > 0 && (/^(?:(?:please|can you|could you|actually)\s+)*drop\b/.test(n) || /\bout$/.test(n))))) {
+    if (!/^(?:(?:please|can you|could you|actually)\s+)*take\b/.test(n) || /\bout\b/.test(n)) {
+      return { intent: 'cart_remove', args: { target: m[1].trim() } };
+    }
+  }
+  m = n.match(CART_QTY);
+  if (m && (CART_WORD.test(n) || lines > 0)) {
+    const qty = qtyOf(m[2]);
+    const target = `${m[1]} ${m[3] || ''}`.replace(/\b(?:the quantity of|quantity|qty|of)\b/g, ' ').replace(/\s+/g, ' ').trim();
+    if (qty !== null) return { intent: 'cart_qty', args: { target: target || 'it', qty } };
+  }
+  return null;
+}
+
 function routeSentence(raw, ctx) {
   const n = stripFillers(normalize(raw));
   if (!n || FILLER_ONLY.test(n)) return null;
   const state = ctx.state || 'IDLE';
+  const cart = matchCart(n, ctx);
+  if (cart) return cart;
 
   if (n.replace(/^(?:yes|yeah|yep)\s+/, '') === 'confirm purchase') return { intent: 'confirm', args: { transcript: raw } };
   if (isReorder(n)) return { intent: 'reorder', args: { category: detectCategory(n) } };
@@ -225,6 +285,15 @@ export function route(text, ctx = { state: 'IDLE', optionCount: 3 }) {
   const c = { optionCount: 3, ...ctx };
   const state = c.state || 'IDLE';
   const whole = stripFillers(normalize(raw));
+
+  // Cart commands work in every state ("what's in my cart?" while a question is open, too).
+  const parts = splitSentences(raw).filter((p) => !isFillerOnly(p));
+  if (parts.some((p) => matchCart(stripFillers(normalize(p)), c))) {
+    if (state === 'IDLE' || state === 'CLARIFY' || state === 'DONE') {
+      return parts.map((p) => matchCart(stripFillers(normalize(p)), c) || (state === 'CLARIFY' ? { intent: 'answer_clarify', args: { text: p } } : routeSentence(p, c) || { intent: 'request', args: { text: p } })).filter(Boolean);
+    }
+    return routeSentences(raw, c);
+  }
 
   if (state === 'IDLE' || state === 'CLARIFY' || state === 'DONE') {
     if (isReorder(whole)) return [{ intent: 'reorder', args: { category: detectCategory(raw) } }];

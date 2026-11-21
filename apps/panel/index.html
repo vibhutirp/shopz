@@ -29,9 +29,14 @@
           <span id="micPillText">Idle</span>
         </div>
         <button id="muteBtn" class="icon-btn" type="button" title="Voice on (M)" aria-pressed="false" aria-label="Mute the agent voice"></button>
-        <button id="actBtn" class="act-btn" type="button" aria-controls="drawer" aria-expanded="false" title="Activity, memory and audit trail">
+        <button id="cartBtn" class="cart-btn" type="button" aria-controls="cartSheet" aria-expanded="false" title="Your cart" aria-label="Cart, empty">
+          <span id="cartIco" class="cart-ico" aria-hidden="true"></span>
+          <span class="cart-btn-label">Cart</span>
+          <span id="cartCount" class="cart-count" hidden>0</span>
+        </button>
+        <button id="actBtn" class="act-btn" type="button" aria-controls="drawer" aria-expanded="false" title="Audit trail: every step, page and rule (A)">
           <span id="conn" class="conn" title="Connecting…"></span>
-          <span class="act-btn-label">Activity</span>
+          <span class="act-btn-label">Audit</span>
           <span id="actBtnCount" class="act-btn-count">0</span>
           <span id="actBtnChain" class="act-btn-chain" aria-hidden="true"></span>
         </button>
@@ -72,16 +77,41 @@
     </main>
 
     <div id="scrim" class="scrim" hidden></div>
-    <aside id="drawer" class="drawer" aria-label="Activity" aria-hidden="true">
+    <aside id="cartSheet" class="sheet" aria-label="Cart" aria-hidden="true">
       <div class="drawer-head">
         <div>
-          <div class="drawer-title">Activity</div>
-          <div id="drawerSub" class="drawer-sub">Every page read, price seen and rule applied</div>
+          <div class="drawer-title">Cart</div>
+          <div id="cartSub" class="drawer-sub">Demo stores · prices as seen on the product page</div>
         </div>
-        <button id="drawerClose" class="icon-btn" type="button" aria-label="Close activity"></button>
+        <button id="cartClose" class="icon-btn" type="button" aria-label="Close cart"></button>
+      </div>
+      <div id="cartBody" class="sheet-body"></div>
+      <footer id="cartFoot" class="cart-foot" hidden></footer>
+    </aside>
+    <aside id="drawer" class="drawer" aria-label="Audit trail" aria-hidden="true">
+      <div class="drawer-head">
+        <div>
+          <div class="drawer-title">Audit trail</div>
+          <div id="drawerSub" class="drawer-sub">What Shopz did, in plain words – every entry is hash-chained</div>
+        </div>
+        <button id="drawerClose" class="icon-btn" type="button" aria-label="Close audit trail"></button>
       </div>
       <div class="drawer-body">
-        <section id="chips" class="ctx" aria-label="Memory and constraints" hidden></section>
+        <section id="auditSum" class="asum" aria-label="Summary">
+          <div id="asumStats" class="asum-stats">No steps yet</div>
+          <div class="asum-chain">
+            <div id="chain" class="chain unk" role="status"><span class="chain-ico" aria-hidden="true"></span><span class="chain-main">Hash chain: checking…</span></div>
+            <div class="asum-actions">
+              <button id="verifyBtn" class="btn btn-sm" type="button">Verify again</button>
+              <button id="exportBtn" class="btn btn-sm" type="button">Export JSON</button>
+            </div>
+          </div>
+          <div id="chainDetail" class="chain-detail" hidden></div>
+        </section>
+        <details id="ctxBox" class="ctxbox" hidden>
+          <summary><span>What Shopz remembers</span><span id="ctxCount" class="ctx-meta"></span></summary>
+          <section id="chips" class="ctx" aria-label="Memory and constraints" hidden></section>
+        </details>
         <section id="storesSec" class="ctx-sec stores" aria-label="Allowed stores" hidden>
           <div class="ctx-label">Stores Shopz may search <span class="ctx-meta">live web · only these are opened</span></div>
           <div id="storeList" class="store-list"></div>
@@ -90,14 +120,10 @@
             <button class="btn" type="submit">Add</button>
           </form>
         </section>
-        <section class="ctx-sec">
-          <div class="ctx-label">Audit trail <span class="ctx-meta">newest first · tap a row for the raw event</span></div>
-          <div id="tl" class="tl-list">
-            <div id="tlEmpty" class="tl-empty">Every page read, price seen, rule applied and word said lands here – hash-chained.</div>
-          </div>
+        <section id="tl" class="tl" aria-label="Timeline">
+          <div id="tlEmpty" class="tl-empty">Each request you make shows up here as a short story: what Shopz searched, compared, read and checked, and which of your rules applied.</div>
         </section>
       </div>
-      <footer id="chain" class="chain unk"><span class="chain-main">Hash chain: checking…</span></footer>
     </aside>
   </div>
 
@@ -109,10 +135,11 @@
       <dl>
         <dt><kbd>Space</kbd> hold</dt><dd>Push to talk (stops the agent if it is speaking)</dd>
         <dt><kbd>M</kbd></dt><dd>Mute / unmute the agent voice (flow continues)</dd>
-        <dt><kbd>A</kbd></dt><dd>Open / close the activity drawer</dd>
+        <dt><kbd>A</kbd></dt><dd>Open / close the audit trail</dd>
         <dt><kbd>Shift</kbd>+<kbd>P</kbd></dt><dd>Simulated price change on the first option (+$10)</dd>
         <dt><kbd>Shift</kbd>+<kbd>R</kbd></dt><dd>Reset session and stores, then reload</dd>
-        <dt><kbd>Esc</kbd></dt><dd>Close this help / the drawer / leave the text box</dd>
+        <dt><kbd>C</kbd></dt><dd>Open / close the cart</dd>
+        <dt><kbd>Esc</kbd></dt><dd>Close this help / the drawer / the cart / leave the text box</dd>
         <dt><kbd>?</kbd></dt><dd>Toggle this help</dd>
       </dl>
     </div>

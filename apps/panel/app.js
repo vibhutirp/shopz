@@ -201,6 +201,7 @@
     option_selected: 'check', price_observed: 'tag', stock_checked: 'box', policy_decision: 'shield',
     approval_requested: 'shield', approval_granted: 'check', approval_denied: 'x', checkout_started: 'cart',
     checkout_step: 'cart', order_confirmed: 'box', error: 'alert', fallback_used: 'reload', handoff: 'out', web_search: 'search',
+    cart_item_added: 'cart', cart_item_removed: 'x', cart_quantity_changed: 'cart', cart_checkout_started: 'cart', cart_checkout_done: 'box',
   };
   function toneOf(ev) {
     const t = ev.type;
@@ -208,7 +209,7 @@
       const d = String(findKey(ev.data, 'decision') || '').toUpperCase();
       return d === 'AUTO_APPROVE' ? 'good' : d === 'DENY' ? 'bad' : 'warn';
     }
-    if (t === 'approval_granted' || t === 'order_confirmed') return 'good';
+    if (t === 'approval_granted' || t === 'order_confirmed' || t === 'cart_checkout_done') return 'good';
     if (t === 'error' || t === 'injection_ignored' || t === 'approval_denied') return 'bad';
     if (['approval_requested', 'price_observed', 'answer_not_on_page', 'fallback_used'].includes(t)) return 'warn';
     if (ev.actor === 'user' || ['utterance', 'user_interrupt', 'barge_in'].includes(t)) return 'user';
@@ -368,6 +369,11 @@
       case 'order_confirmed': now = 'Placing the order'; break;
       case 'handoff': done = 'Ready to buy – handed off to the store (Shopz does not pay)'; now = 'Getting it ready in the store'; break;
       case 'web_search': now = 'Searching the web'; break;
+      case 'cart_item_added': done = done.replace(/ at \$[\d.,]+ to the cart$/, ' to the cart'); now = 'Adding it to your cart'; break;
+      case 'cart_item_removed': now = 'Updating your cart'; break;
+      case 'cart_quantity_changed': now = 'Updating your cart'; break;
+      case 'cart_checkout_started': done = 'Checking out your cart'; now = 'Re-checking every item in your cart'; break;
+      case 'cart_checkout_done': now = 'Placing the orders'; break;
       case 'fallback_used': now = 'Trying another way'; break;
       default: break;
     }
@@ -383,7 +389,9 @@
     if (t.pages.size) parts.push('read ' + pl(t.pages.size, 'product page'));
     else if (t.opened.size) parts.push('opened ' + pl(t.opened.size, 'product page'));
     if (t.policy) parts.push('checked your purchase rules');
-    if (t.order) parts.push('placed the order');
+    if (t.cartAdd && !t.order && !t.orders) parts.push('added it to your cart');
+    if (t.orders) parts.push(`placed ${t.orders} order${t.orders === 1 ? '' : 's'}`);
+    else if (t.order) parts.push('placed the order');
     if (t.handoff) parts.push('handed off to the store');
     const s = parts.slice(0, 3).join(', ') || 'Worked it out';
     return s.charAt(0).toUpperCase() + s.slice(1);
@@ -429,6 +437,8 @@
     if (ev.type === 'policy_decision') t.policy = true;
     if (ev.type === 'order_confirmed') t.order = true;
     if (ev.type === 'handoff') t.handoff = true;
+    if (ev.type === 'cart_item_added') t.cartAdd = (t.cartAdd || 0) + 1;
+    if (ev.type === 'cart_checkout_done') t.orders = ((ev.data && ev.data.orders) || []).length;
     t.list.querySelectorAll('li.now').forEach((li) => { li.classList.remove('now'); li.classList.add('done'); });
     const tone = toneOf(ev);
     t.list.append(h('li', { class: (['warn', 'bad', 'good'].includes(tone) ? tone + ' ' : '') + 'now' },
@@ -888,8 +898,11 @@
     const box = $('chips');
     box.replaceChildren();
     const wp = $('welcomeProfile');
-    if (!memChips.length && !conChips.length) { box.hidden = true; if (wp) wp.hidden = true; return; }
+    const ctx = $('ctxBox');
+    if (!memChips.length && !conChips.length) { box.hidden = true; ctx.hidden = true; if (wp) wp.hidden = true; return; }
     box.hidden = false;
+    ctx.hidden = false;
+    $('ctxCount').textContent = [memChips.length ? `${memChips.length} saved` : null, conChips.length ? `${conChips.length} for this request` : null].filter(Boolean).join(' · ');
     if (memChips.length) {
       box.append(h('div', { class: 'ctx-label' }, 'What Shopz remembers', h('span', { class: 'ctx-meta' }, 'used for every search')),
         h('div', { class: 'ctx-row' }, memChips.map((c) => {
@@ -964,19 +977,26 @@
         r.stars !== undefined && r.stars !== null ? h('span', null, h('span', { class: 'stars', 'aria-hidden': 'true' }, stars(r.stars)), ` ${r.stars}${r.count ? ` (${fmtInt(r.count)})` : ''}`) : null,
         etaIso ? h('span', null, `Arrives ${niceDate(etaIso)}`) : null),
       o.why ? h('div', { class: 'pc-why' }, o.why) : null,
+      !o.live ? h('button', {
+        class: 'linkbtn pc-more', type: 'button',
+        onclick: (e) => { e.stopPropagation(); detail.hidden = !detail.hidden; e.currentTarget.textContent = detail.hidden ? 'Seller, returns, shipping' : 'Hide details'; },
+      }, 'Seller, returns, shipping') : null,
       o.live ? h('div', { class: 'pc-src' },
         h('span', null, o.page_source === 'json-ld' ? 'read from the product page' : o.page_source ? 'from the store page' : 'from the store search'),
         o.url ? h('a', { class: 'pc-link', href: o.url, target: '_blank', rel: 'noopener noreferrer', onclick: (e) => e.stopPropagation() }, 'View in store ↗') : null) : null,
       detail),
     h('div', { class: 'pc-actions' },
-      h('button', {
+      o.live ? h('button', {
         class: 'btn', type: 'button',
         onclick: (e) => { e.stopPropagation(); detail.hidden = !detail.hidden; e.currentTarget.textContent = detail.hidden ? 'Details' : 'Less'; },
-      }, 'Details'),
+      }, 'Details') : h('button', {
+        class: 'btn btn-cart', type: 'button', 'aria-label': `Add ${o.title || 'this'} to the cart`,
+        onclick: (e) => { e.stopPropagation(); sendText(`Add the ${ORD[i] || 'first'} one to my cart.`); },
+      }, 'Add to cart'),
       h('button', {
         class: 'btn btn-primary', type: 'button',
         onclick: (e) => { e.stopPropagation(); chosen = i; renderCards(); sendText(`Buy the ${ORD[i] || 'first'} one.`); },
-      }, i === chosen ? 'Chosen' : o.live ? 'Get it' : 'Choose this')));
+      }, i === chosen ? 'Chosen' : o.live ? 'Get it' : 'Choose')));
     const open = () => { if (narrated !== i) sendText(`Show me the ${ORD[i] || 'first'} one.`); };
     card.addEventListener('click', open);
     card.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target === card) { e.preventDefault(); open(); } });
@@ -1068,6 +1088,7 @@
     const p = decision.policy;
     const el = decision.policyEl;
     if (!p || !el) return;
+    if (p.scope === 'cart') { renderCartPolicyCard(p, el); return; }
     const dec = String(p.decision || '').toUpperCase();
     const c = policyFacts(p);
     const live = Boolean(p.live);
@@ -1107,6 +1128,58 @@
           h('span', null, c.limit !== null ? `limit ${money(c.limit, c.cur, true)}` : 'total')) : null),
       lines.length ? h('ul', { class: 'rules' }, lines) : null,
       foot);
+  }
+
+  function policyFoot(req, live) {
+    if (req && decision.approval === 'granted') return h('div', { class: 'policy-state ok', html: icon('check') + 'Confirmed by you' });
+    if (req && decision.approval === 'denied') return h('div', { class: 'policy-state no' }, 'Not purchased');
+    if (!req) return null;
+    return [
+      h('div', { class: 'policy-actions' },
+        h('button', { class: 'btn btn-primary', type: 'button', disabled: decision.pending, onclick: () => { decision.pending = true; renderPolicyCard(); sendText('Confirm purchase.'); } }, live ? 'Confirm' : 'Confirm purchase'),
+        h('button', { class: 'btn', type: 'button', disabled: decision.pending, onclick: () => { decision.pending = true; renderPolicyCard(); sendText('Cancel.'); } }, 'Cancel')),
+      h('div', { class: 'policy-hint' }, 'Or say “confirm purchase”. Nothing is bought without it.'),
+    ];
+  }
+
+  /** Cart checkout: the whole cart against the same rules – old and new total, every line, why it needs an OK. */
+  function renderCartPolicyCard(p, el) {
+    const dec = String(p.decision || '').toUpperCase();
+    const inp = p.inputs || {};
+    const rules = Array.isArray(p.rules) ? p.rules : [];
+    const lines = Array.isArray(p.lines) ? p.lines : [];
+    const total = amount(p.total);
+    const was = amount(p.total_as_added);
+    const limit = amount(first(p.limit, inp.limit));
+    const changed = was !== null && total !== null && Math.abs(total - was) >= 0.005;
+    const req = dec === 'REQUIRE_APPROVAL';
+    const stores = Array.isArray(p.stores) ? p.stores.map((x) => x.store_name || storeName(x.merchant_id)) : [];
+    const title = dec === 'AUTO_APPROVE' ? 'Cart within your rules – placing the orders' : dec === 'DENY' ? 'Cart not allowed by your rules' : 'Your cart needs your OK';
+    const sub = [stores.join(' + '), `${lines.length} order${lines.length === 1 ? '' : 's'}`,
+      isNum(Number(inp.orders_today)) && inp.orders_today !== null ? `orders today ${inp.orders_today}${inp.max_orders_per_day ? '/' + inp.max_orders_per_day : ''}` : null].filter(Boolean).join(' · ');
+    const why = rules.length ? rules.map((r) => h('li', { class: DENY_RULES.has(r) ? 'deny' : '' }, cartRuleText(r, p)))
+      : [h('li', { class: 'ok' }, limit !== null ? `Cart total ${money(total)} is within your ${money(limit, 'USD', true)} auto-buy limit` : 'Within your auto-buy rules'),
+        h('li', { class: 'ok' }, `${stores.join(' and ') || 'The stores'} ${stores.length > 1 ? 'are' : 'is'} approved`)];
+    el.className = 'icard policy cartpol ' + (dec === 'AUTO_APPROVE' ? 'dec-auto' : dec === 'DENY' ? 'dec-deny' : 'dec-req');
+    fill(el,
+      h('div', { class: 'policy-head' },
+        h('span', { class: 'policy-ico', html: icon(dec === 'AUTO_APPROVE' ? 'check' : 'shield') }),
+        h('div', null, h('div', { class: 'policy-title' }, title), sub ? h('div', { class: 'policy-sub' }, sub) : null),
+        total !== null ? h('div', { class: 'policy-total' }, h('b', null, money(total)), h('span', null, limit !== null ? `limit ${money(limit, 'USD', true)}` : 'total')) : null),
+      changed ? h('div', { class: 'cartpol-diff' },
+        h('span', { class: 'lbl' }, 'Cart total'),
+        h('span', { class: 'pdiff-row' }, h('s', null, money(was)), h('span', { 'aria-hidden': 'true' }, '→'), h('b', null, money(total)),
+          h('span', { class: 'delta' + (total < was ? ' down' : '') }, (total > was ? '+' : '−') + money(Math.abs(total - was)))),
+        h('span', { class: 'lbl muted' }, 'when added → now')) : null,
+      lines.length ? h('ul', { class: 'cartpol-lines' }, lines.map((l) => {
+        const up = isNum(l.price_now) && isNum(l.price_added) && Math.abs(l.price_now - l.price_added) >= 0.005;
+        return h('li', { class: l.in_stock === false ? 'out' : '' },
+          h('span', { class: 'q' }, `${l.qty}×`),
+          h('span', { class: 'n', title: l.title || '' }, l.title, h('span', { class: 's' }, l.store_name || storeName(l.merchant_id) || '')),
+          h('span', { class: 'p' }, up ? [h('s', null, money(l.price_added)), ' ', h('b', null, money(l.price_now))] : money(l.price_now), l.in_stock === false ? h('span', { class: 'oos' }, 'out of stock') : null));
+      })) : null,
+      h('ul', { class: 'rules' }, why),
+      policyFoot(req, false));
   }
 
   function showPriceCard(d) {
@@ -1222,15 +1295,22 @@
       if (missing.includes('deadline')) return [['By next Friday', 'By next Friday.'], ['Within two weeks', 'Within two weeks.']];
       return START_CHIPS;
     }
+    const inCart = cartItems() > 0;
     if (options.length && ['AWAIT_CHOICE', 'NARRATE', 'ANSWER', 'NAVIGATE', 'SELECT'].includes(curState)) {
       const i = narrated >= 0 ? narrated : 0;
-      const list = [['Show reviews', 'Show me the reviews.'], ['Is it waterproof?', 'Is it waterproof?'], ['Return policy', "What's the return policy?"]];
+      const list = [['Show reviews', 'Show me the reviews.'], ['Is it waterproof?', 'Is it waterproof?']];
+      if (!inCart) list.push(['Return policy', "What's the return policy?"]);
       if (i < options.length - 1) list.push(['Next option', 'Next one.']);
       if (i > 0) list.push(['Go back', 'Go back.']);
+      list.push(['Add to cart', 'Add this to my cart.']);
+      if (inCart) list.push(['Check out cart', 'Check out my cart.']);
       list.push(['Buy this', 'Buy this one.', true]);
       return list;
     }
-    if (curState === 'DONE' || curState === 'IDLE') return thread.querySelector('.msg') ? START_CHIPS : [];
+    if (curState === 'DONE' || curState === 'IDLE') {
+      if (!thread.querySelector('.msg')) return [];
+      return inCart ? [['Check out cart', 'Check out my cart.', true], ["What's in my cart?", "What's in my cart?"], ...START_CHIPS] : START_CHIPS;
+    }
     return [];
   }
   function chipButtons(list) {
@@ -1252,74 +1332,580 @@
     scrollTurns();
   }
 
-  /* ------------------------------------------------------------------ drawer + audit trail */
+  /* ------------------------------------------------------------------ cart (demo stores) */
+  const sheet = $('cartSheet');
+  let cart = null; // cartView from the agent: { lines, totals, updated_at }
+  let cartBusy = false;
+  const cartItems = () => (cart && cart.totals ? Number(cart.totals.item_count || 0) + Number(cart.totals.external_count || 0) : 0);
+  const pl = (n, w, many) => `${n} ${n === 1 ? w : many || w + 's'}`;
+
+  function syncScrim() { $('scrim').hidden = !(drawer.classList.contains('open') || sheet.classList.contains('open')); }
+  function setCart(open) {
+    if (open && isLive()) return;
+    if (open && drawer.classList.contains('open')) setDrawer(false);
+    sheet.classList.toggle('open', open);
+    sheet.setAttribute('aria-hidden', String(!open));
+    $('cartBtn').setAttribute('aria-expanded', String(open));
+    syncScrim();
+    if (open) renderCart();
+  }
+
+  function lineImg(l, cls) {
+    return h('div', { class: cls },
+      l.image_url ? h('img', { class: 'photo', src: l.image_url, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' })
+        : l.sku ? h('img', { src: artUrl(l.sku), alt: '', loading: 'lazy' }) : null);
+  }
+
+  function setCartData(c) {
+    cart = c && Array.isArray(c.lines) ? c : null;
+    const n = cartItems();
+    const badge = $('cartCount');
+    const was = Number(badge.textContent) || 0;
+    badge.textContent = String(n);
+    badge.hidden = n === 0;
+    if (n > was) { badge.classList.remove('bump'); void badge.offsetWidth; badge.classList.add('bump'); }
+    $('cartBtn').setAttribute('aria-label', n ? `Cart, ${pl(n, 'item')}, ${money(cart.totals.total)}` : 'Cart, empty');
+    if (sheet.classList.contains('open')) renderCart();
+    renderQuick();
+  }
+
+  async function cartOp(body) {
+    if (cartBusy) return;
+    cartBusy = true;
+    sheet.classList.add('busy');
+    const r = await post('/api/cart', { session_id: SESSION, ...body });
+    cartBusy = false;
+    sheet.classList.remove('busy');
+    if (r && r.cart) setCartData(r.cart);
+  }
+
+  function cartRow(l) {
+    const cur = l.currency || 'USD';
+    const ext = l.source === 'external';
+    const changedPrice = isNum(l.first_seen_price) && Math.abs(l.first_seen_price - l.unit_price) >= 0.005;
+    return h('li', { class: 'cline' + (ext ? ' ext' : ''), 'data-line': l.line_id },
+      lineImg(l, 'cline-img'),
+      h('div', { class: 'cline-main' },
+        h('div', { class: 'cline-title', title: l.title || '' }, l.title || l.sku),
+        h('div', { class: 'cline-meta' },
+          `${money(l.unit_price, cur)} each`,
+          changedPrice ? h('span', { class: 'was' }, ` · first seen ${money(l.first_seen_price, cur)}`) : null,
+          ` · seen ${hms(l.seen_at).slice(0, 5)}`),
+        ext
+          ? h('a', { class: 'btn btn-sm cline-open', href: l.url || '#', target: '_blank', rel: 'noopener noreferrer', html: 'Open at store ' + icon('out') })
+          : h('div', { class: 'cline-ctrl' },
+            h('div', { class: 'stepper', role: 'group', 'aria-label': `Quantity of ${l.title}` },
+              h('button', { type: 'button', class: 'step-btn', 'aria-label': 'One less', disabled: cartBusy || null, onclick: () => cartOp({ op: 'qty', line_id: l.line_id, qty: l.qty - 1 }), html: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 8h8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>' }),
+              h('span', { class: 'step-n', 'aria-live': 'polite' }, String(l.qty)),
+              h('button', { type: 'button', class: 'step-btn', 'aria-label': 'One more', disabled: cartBusy || l.qty >= 10 || null, onclick: () => cartOp({ op: 'qty', line_id: l.line_id, qty: l.qty + 1 }), html: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 8h8M8 4v8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>' })),
+            h('button', { type: 'button', class: 'linkbtn cline-rm', onclick: () => cartOp({ op: 'remove', line_id: l.line_id }) }, 'Remove'))),
+      h('div', { class: 'cline-price' }, ext ? h('span', { class: 'muted' }, 'as seen') : money(l.line_total, cur), ext ? h('b', null, money(l.unit_price, cur)) : null));
+  }
+
+  function renderCart() {
+    const body = $('cartBody');
+    const foot = $('cartFoot');
+    const lines = (cart && cart.lines) || [];
+    const tot = (cart && cart.totals) || null;
+    if (!lines.length) {
+      fill(body, h('div', { class: 'cart-empty' },
+        h('div', { class: 'cart-empty-ico', html: icon('cart') }),
+        h('div', { class: 'cart-empty-title' }, 'Your cart is empty'),
+        h('div', { class: 'cart-empty-text' }, 'Say “add this to my cart” while Shopz shows a product, or tap Add to cart on a card. You can mix items from both stores.')));
+      foot.hidden = true;
+      $('cartSub').textContent = 'Demo stores · prices as seen on the product page';
+      return;
+    }
+    $('cartSub').textContent = `${pl(tot.item_count, 'item')} from ${pl(tot.stores.length, 'store')} · prices as seen on the product page`;
+    const byId = new Map(lines.map((l) => [l.line_id, l]));
+    const groups = tot.stores.map((st) => h('section', { class: 'cstore' },
+      h('div', { class: 'cstore-head' }, h('span', { class: 'cstore-name' }, st.store_name || storeName(st.merchant_id)), h('span', { class: 'cstore-meta' }, pl(st.item_count, 'item'))),
+      h('ol', { class: 'clines' }, st.line_ids.map((id) => byId.get(id)).filter(Boolean).map(cartRow)),
+      h('div', { class: 'cstore-sub' }, h('span', null, 'Subtotal'), h('span', null, money(st.subtotal)))));
+    const ext = lines.filter((l) => l.source === 'external');
+    if (ext.length) {
+      groups.push(h('section', { class: 'cstore ext' },
+        h('div', { class: 'cstore-head' }, h('span', { class: 'cstore-name' }, 'Other stores'), h('span', { class: 'cstore-meta' }, 'not checked out by Shopz')),
+        h('ol', { class: 'clines' }, ext.map(cartRow))));
+    }
+    fill(body, groups);
+    const ship = amount(tot.shipping);
+    fill(foot,
+      h('dl', { class: 'ctot' },
+        h('dt', null, 'Items'), h('dd', null, money(tot.subtotal)),
+        h('dt', null, `Tax ${isNum(tot.tax_rate) ? (tot.tax_rate * 100).toFixed(3).replace(/0+$/, '') + ' %' : ''}`), h('dd', null, money(tot.tax)),
+        h('dt', null, 'Shipping'), h('dd', null, ship ? money(ship) : 'Free'),
+        h('dt', { class: 'big' }, 'Total'), h('dd', { class: 'big' }, money(tot.total))),
+      tot.line_count ? h('button', {
+        class: 'btn btn-primary cart-go', type: 'button', disabled: cartBusy || null,
+        onclick: () => { setCart(false); sendText('Check out my cart.'); },
+      }, `Check out · ${money(tot.total)}`) : null,
+      h('div', { class: 'cart-hint' }, tot.line_count
+        ? `${pl(tot.line_count, 'order')} at the demo stores. Shopz re-checks every page and your purchase rules first.`
+        : 'Open these items at their store to buy them.'));
+    foot.hidden = false;
+  }
+
+  async function loadCart() {
+    try {
+      const r = await fetch('/api/cart?session=' + encodeURIComponent(SESSION), { cache: 'no-store' });
+      if (!r.ok) return;
+      const j = await r.json();
+      if (j.live) { $('cartBtn').hidden = true; return; }
+      setCartData(j.cart);
+    } catch { /* the cart also arrives over SSE */ }
+  }
+
+  function showCartAdded(d) {
+    const l = ((d.cart && d.cart.lines) || []).find((x) => x.line_id === d.line_id);
+    if (!l) return;
+    const tot = d.cart.totals;
+    const t = ensureAgentTurn();
+    t.attach.append(h('div', { class: 'icard cartadd' },
+      lineImg(l, 'cartadd-img'),
+      h('div', { class: 'cartadd-main' },
+        h('div', { class: 'cartadd-top', html: icon('check') + 'Added' + (d.added > 1 ? ` <span class="muted">× ${Number(d.added)}</span>` : '') }),
+        h('div', { class: 'cartadd-title', title: l.title || '' }, l.title || l.sku),
+        h('div', { class: 'cartadd-sub' }, `Cart · ${pl(tot.item_count, 'item')} · ${money(tot.total)} total`)),
+      h('button', { class: 'btn btn-sm', type: 'button', onclick: () => setCart(true) }, 'View cart')));
+    scrollTurns();
+  }
+
+  function showCartSummary(c) {
+    const t = ensureAgentTurn();
+    const lines = (c && c.lines) || [];
+    if (!lines.length) return;
+    const tot = c.totals;
+    t.attach.append(h('div', { class: 'icard cartsum' },
+      h('div', { class: 'icard-top', html: icon('cart') + esc(`Your cart · ${pl(tot.item_count, 'item')}`) }),
+      h('ul', { class: 'cartsum-list' }, lines.map((l) => h('li', null,
+        h('span', { class: 'q' }, `${l.qty}×`), h('span', { class: 'n' }, l.title), h('span', { class: 's' }, l.store_name || ''),
+        h('span', { class: 'p' }, l.source === 'external' ? money(l.unit_price) : money(l.line_total))))),
+      h('div', { class: 'cartsum-foot' },
+        h('span', null, 'Total with tax', h('b', null, money(tot.total))),
+        h('button', { class: 'btn btn-sm', type: 'button', onclick: () => setCart(true) }, 'View cart'))));
+    scrollTurns();
+  }
+
+  function showCartOrderCard(d) {
+    const t = ensureAgentTurn();
+    const orders = Array.isArray(d.orders) ? d.orders : [];
+    const how = d.approval_mode === 'user_explicit' ? 'Confirmed by you' : d.approval_mode === 'auto' ? 'Automatic – within your rules' : '';
+    if (!orders.length) {
+      if (d.failed) t.attach.append(h('div', { class: 'icard', html: icon('alert') + ' Checkout did not go through – nothing was bought. Your cart is unchanged.' }));
+      return;
+    }
+    t.attach.append(h('div', { class: 'icard order corder' },
+      h('div', { class: 'order-head' },
+        h('span', { class: 'order-ico', html: icon('check') }),
+        h('div', null, h('div', { class: 'order-title' }, `${pl(orders.length, 'order')} placed`), h('div', { class: 'order-sub' }, how)),
+        h('span', { class: 'tag', style: 'margin-left:auto' }, 'demo orders')),
+      h('ol', { class: 'corder-list' }, orders.map((o) => {
+        const it = Array.isArray(o.items) && o.items[0] ? o.items[0] : {};
+        return h('li', null,
+          it.sku ? h('div', { class: 'corder-img' }, h('img', { src: artUrl(it.sku), alt: '' })) : null,
+          h('div', { class: 'corder-main' },
+            h('div', { class: 'corder-title' }, `${it.title || it.sku || ''}${it.qty > 1 ? ` × ${it.qty}` : ''}`),
+            h('div', { class: 'corder-meta' }, [o.store_name || storeName(o.merchant_id), o.order_id, o.delivery_eta ? 'arrives ' + niceDate(o.delivery_eta) : null].filter(Boolean).join(' · '))),
+          h('div', { class: 'corder-price' }, money(o.totals && o.totals.total)));
+      })),
+      h('div', { class: 'corder-foot' }, h('span', null, 'Paid in total'), h('b', null, money(d.total, d.currency))),
+      d.failed ? h('div', { class: 'pview-note', html: icon('alert') + esc(`${d.failed.title || 'One item'} did not go through – it is still in your cart.`) }) : null));
+    if (decision.policy && decision.policyEl && decision.policy.scope === 'cart' && !decision.approval) { decision.approval = 'granted'; renderPolicyCard(); }
+    scrollTurns();
+  }
+
+  /* ------------------------------------------------------------------ audit trail (readable timeline) */
   const drawer = $('drawer');
   function setDrawer(open) {
+    if (open && sheet.classList.contains('open')) setCart(false);
     drawer.classList.toggle('open', open);
     drawer.setAttribute('aria-hidden', String(!open));
-    $('scrim').hidden = !open;
     $('actBtn').setAttribute('aria-expanded', String(open));
+    syncScrim();
+    if (open) renderTimeline();
   }
   const tl = $('tl');
-  const rowsByKey = new Map();
-  const MAX_ROWS = 500;
+  const auditEvents = []; // chronological (by seq)
+  const auditKeys = new Set();
+  const MAX_EVENTS = 3000;
+  const openEntries = new Set(); // entry keys with technical details open
+  const groupOpen = new Map(); // group key → expanded (user choice wins over the default)
+  let tlTimer = null;
 
-  function buildRow(ev) {
-    const data = ev.data || {};
-    const quote = findKey(data, 'quoted_span');
-    const sha = first(findKey(data, 'snapshot_sha256'), data.snapshot && data.snapshot.sha256);
-    const tone = toneOf(ev);
-    const row = h('div', { class: `ev tone-${tone}` });
-    row.dataset.seq = isNum(ev.seq) ? String(ev.seq) : '';
-    const line = h('div', { class: 'ev-line', role: 'button', title: 'Show details' },
-      h('span', { class: 'ev-ico', html: icon(TYPE_ICON[ev.type] || 'dot') }),
-      h('span', { class: 'ev-sum' }, ev.summary || ev.type || ''),
-      h('span', { class: 'ev-seq' }, isNum(ev.seq) ? '#' + ev.seq : ''),
-      h('span', { class: 'ev-meta' }, `${hms(ev.ts)} · ${ev.type || 'event'}`));
-    row.append(line);
-    if (quote || sha) {
-      row.append(h('div', { class: 'ev-extra' },
-        quote ? h('span', { class: 'ev-quote' }, `“${quote}”`) : null,
-        sha ? h('span', { class: 'ev-sha' }, 'page snapshot sha256 ' + short(sha)) : null));
+  const PHASE_OF = {
+    clarify_question: 'understand', preference_used: 'understand', user_interrupt: 'understand', barge_in: 'understand',
+    search_issued: 'search', search_result: 'search', web_search: 'search',
+    product_filtered: 'compare', ranking: 'compare', options_presented: 'compare',
+    page_opened: 'check', page_navigate: 'check', page_read: 'check', page_reload: 'check', answer_given: 'check', answer_not_on_page: 'check',
+    injection_ignored: 'check', price_observed: 'check', stock_checked: 'check', option_selected: 'check',
+    policy_decision: 'rules', approval_requested: 'rules', approval_granted: 'rules', approval_denied: 'rules',
+    checkout_started: 'buy', checkout_step: 'buy', order_confirmed: 'buy', handoff: 'buy', cart_checkout_done: 'buy',
+    cart_item_added: 'cart', cart_item_removed: 'cart', cart_quantity_changed: 'cart', cart_checkout_started: 'cart',
+  };
+  const PHASE_LABEL = { understand: 'Understand', search: 'Search', compare: 'Compare', check: 'Check', rules: 'Your rules', buy: 'Buy', cart: 'Cart' };
+  const DEC_LABEL = { AUTO_APPROVE: 'AUTO', REQUIRE_APPROVAL: 'NEEDS YOUR OK', DENY: 'NOT ALLOWED' };
+  const DENIED_WHY = {
+    user_cancelled: 'you said no', timeout: 'no answer in time', cart_changed: 'the cart changed', cart_rechecked: 'checked out again',
+    user_navigated_away: 'you moved on', price_changed: 'the price changed',
+  };
+  const clean = (s) => String(s || '').replace(SNAP_TAIL, '');
+  const skuOf = (ev) => first(ev.data && ev.data.sku, ev.refs && ev.refs.sku);
+  const titleOf = (ev) => {
+    const d = ev.data || {};
+    const sku = skuOf(ev);
+    const o = sku ? optionBySku(sku) : null;
+    const l = sku && cart ? (cart.lines || []).find((x) => x.sku === sku) : null;
+    return first(d.title, o && o.title, l && l.title, sku && skuNames.get(sku), sku);
+  };
+  const shortTitle = (t) => String(t || '').replace(/\s+[–-]\s+.*$/, '').replace(/\s+–.*$/, '');
+
+  function joinable(last, ev) {
+    if (!last) return false;
+    const t = ev.type;
+    const sku = skuOf(ev);
+    if (['page_opened', 'page_navigate', 'page_read'].includes(t)) return last.kind === 'page' && last.sku === sku;
+    if (['price_observed', 'stock_checked'].includes(t)) return ['page', 'recheck'].includes(last.kind) && last.sku === sku;
+    if (t === 'product_filtered') return last.kind === 'filter';
+    if (t === 'search_issued' || t === 'search_result') return last.kind === 'search';
+    if (t === 'checkout_step') return last.kind === 'checkout';
+    return false;
+  }
+  function kindOf(ev) {
+    switch (ev.type) {
+      case 'page_opened': case 'page_navigate': case 'page_read': case 'price_observed': case 'stock_checked': return 'page';
+      case 'page_reload': return 'recheck';
+      case 'product_filtered': return 'filter';
+      case 'search_issued': case 'search_result': return 'search';
+      case 'checkout_started': case 'checkout_step': return 'checkout';
+      case 'policy_decision': return 'policy';
+      default: return 'single';
     }
-    line.addEventListener('click', () => toggleRow(row, ev, quote, sha));
-    return row;
   }
 
-  function toggleRow(row, ev, quote, sha) {
-    if (!row.querySelector('.ev-detail')) {
-      const data = ev.data || {};
-      const snapId = first(findKey(data, 'snapshot_id'));
-      row.append(h('div', { class: 'ev-detail' },
-        quote ? h('div', { class: 'evd-quote' }, h('span', { class: 'evd-label' }, 'Quoted from the page'), h('blockquote', null, `“${quote}”`)) : null,
-        sha ? h('div', { class: 'evd-sha' }, h('span', { class: 'evd-label' }, 'Page snapshot sha256' + (snapId ? ' · ' + snapId : '')), h('code', null, String(sha))) : null,
-        h('pre', { class: 'evd-json', html: highlightJson(data) }),
-        h('div', { class: 'evd-chain' },
-          [ev.event_id, ev.actor ? 'actor ' + ev.actor : null, 'hash ' + short(ev.hash), 'prev ' + short(ev.prev_hash)].filter(Boolean).join(' · '))));
+  const skuNames = new Map(); // sku → product name, learned from any event that carries both
+  function learnNames(ev) {
+    const d = ev.data || {};
+    const take = (o) => { if (o && typeof o === 'object' && o.sku && o.title && !skuNames.has(o.sku)) skuNames.set(o.sku, o.title); };
+    take(d);
+    take(d.value);
+    for (const arr of [d.options, d.lines, d.items]) if (Array.isArray(arr)) arr.forEach(take);
+  }
+
+  /** Chronological events → groups (one per thing you asked) → entries (merged bursts) with phase. */
+  function buildStory(events) {
+    const groups = [];
+    const seenPrice = new Map(); // sku → first price seen in the session
+    let g = null;
+    events.forEach(learnNames);
+    const open = (ev) => {
+      g = { key: ev ? 'g' + ev.seq : 'g0', ev, entries: [], stores: new Set(), pages: new Set(), rules: 0, orders: 0, added: 0, handoff: false, denied: false, asked: false };
+      groups.push(g);
+    };
+    for (const ev of events) {
+      if (ev.type === 'session_started') continue;
+      if (ev.type === 'utterance') { open(ev); continue; }
+      if (!g) open(null);
+      const d = ev.data || {};
+      const last = g.entries[g.entries.length - 1];
+      if (ev.type === 'price_observed' && skuOf(ev) && isNum(amount(d.price))) {
+        const sku = skuOf(ev);
+        ev._was = seenPrice.has(sku) ? seenPrice.get(sku) : null;
+        if (!seenPrice.has(sku)) seenPrice.set(sku, amount(d.price));
+      }
+      if (ev.type === 'search_issued') g.stores.add(first(d.store_name, d.store));
+      if (ev.type === 'page_read' && skuOf(ev)) g.pages.add(skuOf(ev));
+      if (ev.type === 'policy_decision') { g.rules++; if (String(d.decision).toUpperCase() === 'DENY') g.denied = true; }
+      if (ev.type === 'order_confirmed') g.orders++;
+      if (ev.type === 'cart_item_added') g.added += Number(d.qty_added) || 1;
+      if (ev.type === 'handoff') g.handoff = true;
+      if (ev.type === 'approval_requested') g.asked = true;
+      if (joinable(last, ev)) { last.events.push(ev); continue; }
+      const phase = PHASE_OF[ev.type] || (last ? last.phase : 'understand');
+      g.entries.push({ key: 'e' + ev.seq, kind: kindOf(ev), sku: skuOf(ev), phase, events: [ev] });
     }
-    row.classList.toggle('open');
+    return groups;
+  }
+
+  function groupOutcome(g) {
+    const parts = [];
+    if (g.stores.size) parts.push('searched ' + pl(g.stores.size, 'store'));
+    if (g.pages.size) parts.push('read ' + pl(g.pages.size, 'page'));
+    if (g.rules) parts.push(pl(g.rules, 'rule check'));
+    if (g.added) parts.push('added ' + pl(g.added, 'item') + ' to the cart');
+    if (g.orders) parts.push(pl(g.orders, 'order') + ' placed');
+    else if (g.handoff) parts.push('handed off to the store');
+    else if (g.denied) parts.push('not allowed');
+    else if (g.asked) parts.push('waiting for your OK');
+    if (!parts.length) parts.push(pl(g.entries.length, 'step'));
+    const s = parts.join(' · ');
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+
+  function priceChange(before, after, cur) {
+    if (before === null || after === null) return null;
+    const delta = after - before;
+    if (Math.abs(delta) < 0.005) return h('span', { class: 'pchip' }, money(after, cur));
+    return h('span', { class: 'pchange' }, h('s', null, money(before, cur)), h('span', { 'aria-hidden': 'true' }, '→'), h('b', null, money(after, cur)),
+      h('span', { class: 'delta' + (delta < 0 ? ' down' : '') }, (delta > 0 ? '+' : '−') + money(Math.abs(delta), cur)));
+  }
+
+  /** One entry → { icon, tone, text, facts (inline chips), extra (block below) } in plain language. */
+  function describe(e) {
+    const ev = e.events[0];
+    const evs = e.events;
+    const d = ev.data || {};
+    const t = ev.type;
+    const name = shortTitle(titleOf(ev)) || 'the product';
+    let text = clean(ev.summary) || t;
+    let tone = toneOf(ev);
+    let ico = TYPE_ICON[t] || 'dot';
+    const facts = [];
+    let extra = null;
+    switch (e.kind) {
+      case 'page': {
+        const secs = []; let price = null; let was = null; let stock = null; let opened = false;
+        for (const x of evs) {
+          const xd = x.data || {};
+          if (x.type === 'page_opened') opened = true;
+          if (x.type === 'page_read' && xd.section && xd.section !== 'all' && !secs.includes(xd.section)) secs.push(xd.section);
+          if (x.type === 'page_read' && xd.section === 'all' && !secs.includes('all')) secs.push('all');
+          if (x.type === 'price_observed') { price = amount(xd.price); was = x._was; }
+          if (x.type === 'stock_checked') stock = xd.in_stock;
+        }
+        const back = evs.some((x) => /^Went back to /.test(x.summary || ''));
+        ico = secs.length ? 'eye' : 'page';
+        text = secs.length ? `Read the ${name} page` : back ? `Went back to the ${name} page` : opened ? `Opened the ${name} page` : `Looked at ${name}`;
+        if (secs.length) facts.push(h('span', { class: 'secs' }, secs.map((s) => h('span', { class: 'sec read' }, s === 'all' ? 'Whole page' : SECTION_LABEL[s] || s))));
+        if (price !== null) facts.push(was !== null && Math.abs(was - price) >= 0.005 ? priceChange(was, price) : h('span', { class: 'pchip' }, 'price ' + money(price)));
+        if (stock === false) { facts.push(h('span', { class: 'fact bad' }, 'out of stock')); tone = 'bad'; }
+        if (was !== null && price !== null && Math.abs(was - price) >= 0.005) tone = 'warn';
+        if (tone === 'neutral' || tone === 'user') tone = 'neutral';
+        break;
+      }
+      case 'recheck': {
+        let price = null; let was = null; let stock = null;
+        for (const x of evs) {
+          const xd = x.data || {};
+          if (x.type === 'price_observed') { price = amount(xd.price); was = x._was; }
+          if (x.type === 'stock_checked') stock = xd.in_stock;
+        }
+        ico = 'reload';
+        text = `Re-checked price and stock for ${name}`;
+        if (price !== null) facts.push(was !== null && Math.abs(was - price) >= 0.005 ? priceChange(was, price) : h('span', { class: 'pchip' }, money(price) + ' · unchanged'));
+        if (stock !== null) facts.push(h('span', { class: 'fact' + (stock ? ' good' : ' bad') }, stock ? 'in stock' : 'out of stock'));
+        tone = stock === false ? 'bad' : was !== null && price !== null && Math.abs(was - price) >= 0.005 ? 'warn' : 'neutral';
+        break;
+      }
+      case 'search': {
+        const stores = []; let query = null; let res = null;
+        for (const x of evs) {
+          const xd = x.data || {};
+          if (x.type === 'search_issued') { const n = first(xd.store_name, xd.store); if (n && !stores.includes(n)) stores.push(n); query = first(query, xd.query); }
+          if (x.type === 'search_result') res = xd;
+        }
+        ico = 'search';
+        text = stores.length ? `Searched ${stores.join(' and ')}${query ? ` for “${query}”` : ''}` : clean(ev.summary);
+        if (res && isNum(res.seen)) facts.push(h('span', { class: 'fact' }, `${res.seen} seen · ${isNum(res.matched) ? res.matched : '?'} match`));
+        break;
+      }
+      case 'filter': {
+        ico = 'filter';
+        tone = 'warn';
+        text = `Set aside ${pl(evs.length, 'product')}`;
+        extra = h('ul', { class: 'aside-list' }, evs.map((x) => {
+          const m = clean(x.summary).match(/^Filtered out (.+?):\s*(.+)$/);
+          return h('li', null, h('span', { class: 'n' }, shortTitle(m ? m[1] : first(x.data && x.data.title, x.data && x.data.sku))), h('span', { class: 'why' }, m ? m[2] : String((x.data && x.data.reason) || '').replace(/_/g, ' ')));
+        }));
+        break;
+      }
+      case 'checkout': {
+        const steps = evs.filter((x) => x.type === 'checkout_step').map((x) => String((x.data && x.data.step) || '').replace(/_/g, ' '));
+        const failed = evs.some((x) => x.type === 'checkout_step' && x.data && x.data.ok === false);
+        const store = first(storeName(d.merchant_id), d.store_name);
+        text = `Checked out ${d.qty > 1 ? d.qty + ' × ' : ''}${name}${store ? ' at ' + store : ''}`;
+        ico = 'cart';
+        if (isNum(amount(d.total))) facts.push(h('span', { class: 'pchip' }, money(d.total)));
+        if (steps.length) facts.push(h('span', { class: 'fact' }, steps.join(' → ')));
+        if (failed) { tone = 'bad'; facts.push(h('span', { class: 'fact bad' }, 'a step failed')); }
+        break;
+      }
+      case 'policy': {
+        const dec = String(d.decision || '').toUpperCase();
+        const c = policyFacts({ ...d, inputs: d.inputs || {} });
+        const rules = Array.isArray(d.rules) ? d.rules : [];
+        const isCart = d.scope === 'cart';
+        ico = 'shield';
+        tone = dec === 'AUTO_APPROVE' ? 'good' : dec === 'DENY' ? 'bad' : 'warn';
+        text = isCart ? 'Checked the whole cart against your rules' : `Checked ${name} against your rules`;
+        const why = rules.length ? rules.map((r) => h('li', { class: DENY_RULES.has(r) ? 'deny' : '' }, isCart ? cartRuleText(r, d) : ruleText(r, c)))
+          : [h('li', { class: 'ok' }, c.limit !== null ? `Total ${money(c.total)} is within your ${money(c.limit, c.cur, true)} auto-buy limit` : 'Within your rules')];
+        const was = amount(d.total_as_added);
+        extra = h('div', { class: 'rule-box dec-' + (dec === 'AUTO_APPROVE' ? 'auto' : dec === 'DENY' ? 'deny' : 'req') },
+          h('div', { class: 'rule-top' },
+            h('span', { class: 'dtag' }, DEC_LABEL[dec] || dec),
+            h('span', { class: 'rule-total' }, isCart && was !== null && Math.abs(was - c.total) >= 0.005 ? priceChange(was, c.total) : money(c.total),
+              c.limit !== null ? h('span', { class: 'muted' }, ` · limit ${money(c.limit, c.cur, true)}`) : null)),
+          h('ul', { class: 'rule-why' }, why),
+          isCart && Array.isArray(d.lines) ? h('div', { class: 'rule-lines' }, d.lines.map((l) => h('div', null,
+            h('span', null, `${l.qty}× ${shortTitle(l.title)}`),
+            isNum(l.price_now) && isNum(l.price_added) && Math.abs(l.price_now - l.price_added) >= 0.005 ? priceChange(l.price_added, l.price_now) : h('span', { class: 'muted' }, money(l.price_now))))) : null);
+        break;
+      }
+      default:
+        switch (t) {
+          case 'preference_used': text = 'Used your saved preference: ' + clean(ev.summary).replace(/^Used saved preference:\s*/, '').replace(/\s*\((?:seeded[^)]*|learned)\)\s*$/, ''); break;
+          case 'preference_saved': text = 'Remembered for next time: ' + clean(ev.summary).replace(/^[^:]*:\s*/, ''); break;
+          case 'clarify_question': text = 'Asked you: ' + clean(first(d.question, ev.summary)).replace(/^Asked:?\s*/, ''); break;
+          case 'ranking': text = 'Ranked the matches by rating, fit, price and delivery'; if (Array.isArray(d.options)) facts.push(h('span', { class: 'fact' }, d.options.map((o) => shortTitle(o.title)).join(' → '))); break;
+          case 'options_presented': text = `Showed you ${pl(Number(d.count) || 0, 'option')}`; break;
+          case 'answer_given': text = 'Answered from the page'; { const q = findKey(d, 'quoted_span'); if (q) extra = h('blockquote', { class: 'te-quote' }, `“${q}”`); } break;
+          case 'answer_not_on_page': text = `Not on the page${d.topic ? ' (' + d.topic + ')' : ''} – Shopz did not guess`; break;
+          case 'injection_ignored': text = 'Ignored an instruction hidden in the page – only you give instructions'; if (d.quote) extra = h('blockquote', { class: 'te-quote bad' }, `“${d.quote}”`); break;
+          case 'option_selected': text = `You picked ${name}`; break;
+          case 'approval_requested': text = `Asked you to say “${first(d.phrase, 'confirm purchase')}”`; if (isNum(amount(d.total))) facts.push(h('span', { class: 'pchip' }, money(d.total))); break;
+          case 'approval_granted': text = `You confirmed${d.transcript ? ': “' + String(d.transcript).replace(/[.\s]+$/, '') + '”' : ''}`; break;
+          case 'approval_denied': text = `Not bought – ${DENIED_WHY[d.reason] || String(d.reason || 'not confirmed').replace(/_/g, ' ')}`; tone = d.reason === 'user_cancelled' ? 'neutral' : 'warn'; break;
+          case 'order_confirmed': text = `${storeName(d.merchant_id) || 'The store'} confirmed order ${d.order_id || ''}`.trim(); if (d.totals) facts.push(h('span', { class: 'pchip' }, money(d.totals.total))); if (d.delivery_eta) facts.push(h('span', { class: 'fact' }, 'arrives ' + niceDate(d.delivery_eta))); break;
+          case 'handoff': text = 'Handed off to the store – Shopz does not pay'; break;
+          case 'cart_item_added': text = `Added ${d.qty_added > 1 ? d.qty_added + ' × ' : ''}${name} to the cart`; facts.push(h('span', { class: 'pchip' }, money(d.unit_price) + ' as seen')); if (isNum(d.cart_total)) facts.push(h('span', { class: 'fact' }, `cart ${money(d.cart_total)}`)); tone = 'neutral'; break;
+          case 'cart_item_removed': text = `${ev.actor === 'user' ? 'You removed' : 'Removed'} ${name} from the cart`; if (isNum(d.cart_total)) facts.push(h('span', { class: 'fact' }, `cart ${money(d.cart_total)}`)); break;
+          case 'cart_quantity_changed': text = `${ev.actor === 'user' ? 'You changed' : 'Changed'} ${name} from ${d.qty_before} to ${d.qty}`; if (isNum(d.cart_total)) facts.push(h('span', { class: 'fact' }, `cart ${money(d.cart_total)}`)); break;
+          case 'cart_checkout_started': text = `Started checking out the cart${Array.isArray(d.stores) ? ' at ' + d.stores.map((x) => x.store_name).join(' and ') : ''}`; if (isNum(amount(d.total_as_added))) facts.push(h('span', { class: 'pchip' }, money(d.total_as_added) + ' as added')); break;
+          case 'cart_checkout_done': text = Array.isArray(d.orders) ? `Cart checked out: ${pl(d.orders.length, 'order')}` : clean(ev.summary); if (isNum(amount(d.total))) facts.push(h('span', { class: 'pchip' }, money(d.total) + ' paid')); tone = d.failed_line_id ? 'bad' : 'good'; break;
+          case 'user_interrupt': case 'barge_in': text = 'You interrupted – Shopz stopped talking'; tone = 'neutral'; break;
+          case 'error': text = 'Something went wrong: ' + clean(ev.summary); break;
+          case 'fallback_used': text = 'Used another way: ' + clean(ev.summary); break;
+          default: break;
+        }
+    }
+    return { ico, tone, text, facts, extra };
+  }
+
+  function cartRuleText(rule, d) {
+    const inp = d.inputs || {};
+    const lines = Array.isArray(d.lines) ? d.lines : [];
+    switch (rule) {
+      case 'total_over_limit': return `Cart total ${money(d.total)} is over your ${money(first(d.limit, inp.limit), 'USD', true)} auto-buy limit`;
+      case 'price_increased_since_first_seen': {
+        const up = lines.filter((l) => isNum(l.price_now) && isNum(l.price_added) && l.price_now - l.price_added >= 0.005);
+        return 'Price went up since you added it' + (up.length ? ': ' + up.map((l) => `${shortTitle(l.title)} ${money(l.price_added)} → ${money(l.price_now)}`).join(', ') : '');
+      }
+      case 'daily_order_limit': return `${pl(Number(inp.orders_to_place) || lines.length, 'order')} on top of ${Number(inp.orders_today) || 0} today is over your ${first(inp.max_orders_per_day, 3)} per day`;
+      case 'quantity_gt_2': return `More than 2 of one item (${first(inp.max_qty, '?')})`;
+      case 'out_of_stock': { const out = lines.filter((l) => l.in_stock === false); return (out.length ? out.map((l) => shortTitle(l.title)).join(', ') + ' ' + (out.length === 1 ? 'is' : 'are') : 'An item is') + ' out of stock'; }
+      case 'new_merchant': return 'First order at one of these stores';
+      default: return ruleText(rule, policyFacts(d));
+    }
+  }
+
+  function techDetail(e) {
+    return h('div', { class: 'te-tech' }, e.events.map((ev) => {
+      const data = ev.data || {};
+      const sha = first(findKey(data, 'snapshot_sha256'), data.snapshot && data.snapshot.sha256);
+      return h('div', { class: 'tech-ev' },
+        h('div', { class: 'tech-head' }, h('b', null, ev.type), ` · #${ev.seq} · ${hms(ev.ts)}${ev.actor ? ' · ' + ev.actor : ''}`),
+        sha ? h('div', { class: 'tech-row' }, h('span', null, 'page sha256'), h('code', null, String(sha))) : null,
+        h('div', { class: 'tech-row' }, h('span', null, 'hash'), h('code', null, String(ev.hash || '—'))),
+        h('div', { class: 'tech-row' }, h('span', null, 'prev'), h('code', null, String(ev.prev_hash || '—'))),
+        h('pre', { class: 'evd-json', html: highlightJson({ summary: ev.summary, data, refs: ev.refs, event_id: ev.event_id }) }));
+    }));
+  }
+
+  function renderEntry(e) {
+    const x = describe(e);
+    const ev = e.events[0];
+    const li = h('li', { class: `te tone-${x.tone}${e.kind === 'policy' ? ' te-policy' : ''}${openEntries.has(e.key) ? ' open' : ''}` });
+    const line = h('button', { class: 'te-line', type: 'button', 'aria-expanded': String(openEntries.has(e.key)), title: 'Technical details' },
+      h('span', { class: 'te-ico', html: icon(x.ico) }),
+      h('span', { class: 'te-text' }, x.text),
+      h('span', { class: 'te-time' }, hms(ev.ts)));
+    li.append(line);
+    if (x.facts.length) li.append(h('div', { class: 'te-facts' }, x.facts));
+    if (x.extra) li.append(h('div', { class: 'te-extra' }, x.extra));
+    if (openEntries.has(e.key)) li.append(techDetail(e));
+    line.addEventListener('click', () => {
+      const open = !openEntries.has(e.key);
+      if (open) openEntries.add(e.key); else openEntries.delete(e.key);
+      li.classList.toggle('open', open);
+      line.setAttribute('aria-expanded', String(open));
+      const tech = li.querySelector('.te-tech');
+      if (open && !tech) li.append(techDetail(e)); else if (!open && tech) tech.remove();
+    });
+    return li;
+  }
+
+  function renderGroup(g, idx) {
+    const said = g.ev ? first(g.ev.data && g.ev.data.text, clean(g.ev.summary).replace(/^User:\s*"?|"$/g, '')) : null;
+    const expanded = groupOpen.has(g.key) ? groupOpen.get(g.key) : idx < 3;
+    const phases = [];
+    for (const e of g.entries) {
+      const lastP = phases[phases.length - 1];
+      if (!lastP || lastP.phase !== e.phase) phases.push({ phase: e.phase, entries: [e] }); else lastP.entries.push(e);
+    }
+    const body = h('div', { class: 'tg-body' }, phases.map((p) => h('div', { class: 'tp tp-' + p.phase },
+      h('div', { class: 'tp-label' }, PHASE_LABEL[p.phase] || p.phase),
+      h('ol', { class: 'tp-list' }, p.entries.map(renderEntry)))));
+    const head = h('button', { class: 'tg-head', type: 'button', 'aria-expanded': String(expanded) },
+      h('span', { class: 'tg-chev', html: icon('chev') }),
+      h('span', { class: 'tg-main' },
+        h('span', { class: 'tg-said' }, said ? `“${String(said).replace(/[.\s]+$/, '')}”` : 'Session start'),
+        h('span', { class: 'tg-out' }, groupOutcome(g))),
+      h('span', { class: 'tg-time' }, g.ev ? hms(g.ev.ts).slice(0, 5) : ''));
+    const el = h('article', { class: 'tg' + (expanded ? ' open' : '') }, head, body);
+    head.addEventListener('click', () => {
+      const open = !el.classList.contains('open');
+      groupOpen.set(g.key, open);
+      el.classList.toggle('open', open);
+      head.setAttribute('aria-expanded', String(open));
+    });
+    return el;
+  }
+
+  let storyStats = { steps: 0, pages: 0, rules: 0 };
+  function renderTimeline() {
+    clearTimeout(tlTimer);
+    tlTimer = null;
+    const groups = buildStory(auditEvents).filter((g) => g.entries.length || g.ev);
+    const pages = new Set(); let rules = 0; let steps = 0;
+    for (const g of groups) { g.pages.forEach((p) => pages.add(p)); rules += g.rules; steps += g.entries.length; }
+    storyStats = { steps, pages: pages.size, rules };
+    renderSummary();
+    if (!groups.length) { fill(tl, h('div', { id: 'tlEmpty', class: 'tl-empty' }, 'Each request you make shows up here as a short story: what Shopz searched, compared, read and checked, and which of your rules applied.')); return; }
+    const keep = $('drawer').querySelector('.drawer-body');
+    const top = keep.scrollTop;
+    fill(tl, groups.slice().reverse().map((g, i) => renderGroup(g, i)));
+    keep.scrollTop = top;
+  }
+  function scheduleTimeline() {
+    if (!drawer.classList.contains('open')) { renderSummaryCounts(); return; }
+    if (tlTimer) return;
+    tlTimer = setTimeout(renderTimeline, 150);
+  }
+  function renderSummaryCounts() {
+    // cheap count while the drawer is closed (the full story is built when it opens)
+    const pages = new Set(); let rules = 0;
+    for (const ev of auditEvents) { if (ev.type === 'page_read' && skuOf(ev)) pages.add(skuOf(ev)); if (ev.type === 'policy_decision') rules++; }
+    storyStats = { steps: storyStats.steps, pages: pages.size, rules };
+  }
+  function renderSummary() {
+    const s = storyStats;
+    fill($('asumStats'), s.steps
+      ? [h('b', null, String(s.steps)), ` ${s.steps === 1 ? 'step' : 'steps'} · `, h('b', null, String(s.pages)), ` ${s.pages === 1 ? 'page' : 'pages'} read · `, h('b', null, String(s.rules)), ` rule ${s.rules === 1 ? 'check' : 'checks'}`]
+      : 'No steps yet');
   }
 
   function addAudit(ev, fresh) {
     if (!ev || typeof ev !== 'object') return;
     const key = first(ev.event_id, isNum(ev.seq) ? 'seq' + ev.seq : null, ev.hash);
-    if (key !== null && rowsByKey.has(key)) return;
-    const empty = $('tlEmpty');
-    if (empty) empty.remove();
-    const row = buildRow(ev);
-    if (key !== null) rowsByKey.set(key, row);
-
-    // newest first, ordered by seq
+    if (key !== null && auditKeys.has(key)) return;
+    if (key !== null) auditKeys.add(key);
     const seq = isNum(ev.seq) ? ev.seq : Infinity;
-    let before = null;
-    for (const r of tl.children) {
-      const s = r.dataset && r.dataset.seq !== '' ? Number(r.dataset.seq) : Infinity;
-      if (s < seq) { before = r; break; }
-    }
-    tl.insertBefore(row, before);
-    if (fresh) row.classList.add('fresh');
-    while (tl.children.length > MAX_ROWS) tl.lastElementChild.remove();
-    $('actBtnCount').textContent = String(rowsByKey.size);
+    let i = auditEvents.length;
+    while (i > 0 && (isNum(auditEvents[i - 1].seq) ? auditEvents[i - 1].seq : Infinity) > seq) i--;
+    auditEvents.splice(i, 0, ev);
+    if (auditEvents.length > MAX_EVENTS) auditEvents.splice(0, auditEvents.length - MAX_EVENTS);
+    $('actBtnCount').textContent = String(auditKeys.size);
 
     if (fresh) addStep(ev);
     if (ev.type === 'clarify_question') lastClarify = ev.data || null;
@@ -1327,6 +1913,7 @@
     if (ev.type === 'approval_granted' || ev.type === 'approval_denied') {
       if (decision.policy) { decision.approval = ev.type === 'approval_granted' ? 'granted' : 'denied'; decision.pending = false; renderPolicyCard(); renderQuick(); }
     }
+    scheduleTimeline();
     scheduleVerify();
   }
 
@@ -1340,40 +1927,127 @@
     } catch { /* live events still arrive over SSE */ }
   }
 
-  /* ------------------------------------------------------------------ hash chain footer */
+  /* ------------------------------------------------------------------ hash chain: verify (server + this browser) and export */
   let verifyDebounce = null;
   let verifyFailed = false;
+  let lastVerify = null;
   function scheduleVerify() {
     clearTimeout(verifyDebounce);
     verifyDebounce = setTimeout(refreshVerify, 1200);
   }
-  async function refreshVerify() {
+  function canonical(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value === undefined ? null : value);
+    if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
+    const keys = Object.keys(value).filter((k) => value[k] !== undefined).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonical(value[k])).join(',') + '}';
+  }
+  async function sha256(text) {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  /** Recompute every hash in this browser: hash = sha256(prev_hash + canonicalJson(event without hash)). */
+  async function verifyHere(events) {
+    if (!(window.crypto && crypto.subtle)) return null; // needs https or localhost
+    let prev = '0'.repeat(64);
+    for (let i = 0; i < events.length; i++) {
+      const e = events[i];
+      const { hash, ...rest } = e;
+      if (e.seq !== i + 1) return { ok: false, count: events.length, bad_seq: i + 1, reason: 'seq_gap' };
+      if (e.prev_hash !== prev) return { ok: false, count: events.length, bad_seq: e.seq, reason: 'prev_hash_mismatch' };
+      if ((await sha256((rest.prev_hash || '0'.repeat(64)) + canonical(rest))) !== hash) return { ok: false, count: events.length, bad_seq: e.seq, reason: 'hash_mismatch' };
+      prev = hash;
+    }
+    return { ok: true, count: events.length };
+  }
+  const REASON_TEXT = { seq_gap: 'an entry is missing', prev_hash_mismatch: 'an entry does not point to the one before', hash_mismatch: 'an entry was changed after it was written' };
+
+  function renderChain(v) {
     const el = $('chain');
+    const n = Number(v.count) || 0;
+    el.className = 'chain ' + (v.ok ? 'ok' : 'bad');
+    fill(el,
+      h('span', { class: 'chain-ico', html: icon(v.ok ? 'check' : 'alert') }),
+      h('span', { class: 'chain-main' }, v.ok ? 'Hash chain verified' : `Hash chain broken at #${first(v.bad_seq, '?')}`),
+      h('span', { class: 'chain-meta' }, `${pl(n, 'entry', 'entries')}${v.head_hash ? ' · head ' + short(v.head_hash) : ''}`));
+    const badge = $('actBtnChain');
+    badge.className = 'act-btn-chain' + (v.ok ? '' : ' bad');
+    badge.innerHTML = n ? icon(v.ok ? 'check' : 'x') : '';
+    badge.title = v.ok ? 'Hash chain verified' : 'Hash chain broken';
+    $('actBtnCount').textContent = String(n);
+  }
+
+  async function refreshVerify() {
     try {
       const r = await fetch('/api/audit/verify?session=' + encodeURIComponent(SESSION));
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const v = await r.json();
       verifyFailed = false;
-      const n = Number(v.count) || 0;
-      el.className = 'chain ' + (v.ok ? 'ok' : 'bad');
-      const badge = $('actBtnChain');
-      badge.className = 'act-btn-chain' + (v.ok ? '' : ' bad');
-      badge.textContent = n ? (v.ok ? '✓' : '✗') : '';
-      badge.title = v.ok ? 'Hash chain verified' : 'Hash chain broken';
-      $('actBtnCount').textContent = String(n);
-      $('drawerSub').textContent = n ? `${n} event${n === 1 ? '' : 's'} · ${v.ok ? 'hash chain verified' : 'hash chain broken'}` : 'Every page read, price seen and rule applied';
-      fill(el,
-        h('span', { class: 'chain-main' }, v.ok
-          ? `Hash chain verified ✓ (${n} event${n === 1 ? '' : 's'})`
-          : `✗ chain broken at #${first(v.bad_seq, '?')}`),
-        v.head_hash ? h('span', { class: 'chain-head', title: v.head_hash }, 'head ' + short(v.head_hash)) : null);
+      lastVerify = v;
+      renderChain(v);
+      return v;
     } catch (err) {
+      const el = $('chain');
       el.className = 'chain unk';
-      el.replaceChildren(h('span', { class: 'chain-main' }, 'Hash chain: not reachable'));
+      fill(el, h('span', { class: 'chain-ico', html: icon('alert') }), h('span', { class: 'chain-main' }, 'Hash chain: not reachable'));
       if (!verifyFailed) toast('Audit check failed: ' + (err && err.message ? err.message : 'network error'), 'error');
       verifyFailed = true;
+      return null;
     }
   }
+
+  async function verifyAgain() {
+    const btn = $('verifyBtn');
+    const out = $('chainDetail');
+    btn.disabled = true;
+    btn.textContent = 'Verifying…';
+    const started = performance.now();
+    const v = await refreshVerify();
+    let here = null;
+    try {
+      const r = await fetch('/api/audit?session=' + encodeURIComponent(SESSION), { cache: 'no-store' });
+      const evs = (await r.json()).events || [];
+      evs.forEach((ev) => addAudit(ev, false));
+      here = await verifyHere(evs);
+    } catch { here = null; }
+    const ms = Math.max(1, Math.round(performance.now() - started));
+    await new Promise((res) => setTimeout(res, Math.max(0, 350 - ms))); // let the reader see that it ran
+    btn.disabled = false;
+    btn.textContent = 'Verify again';
+    out.hidden = false;
+    const okAll = v && v.ok && (!here || here.ok);
+    out.className = 'chain-detail ' + (okAll ? 'ok' : 'bad');
+    const bad = (v && !v.ok ? v : null) || (here && !here.ok ? here : null);
+    fill(out,
+      h('div', null, h('b', null, okAll ? 'All entries intact' : `Problem at #${bad ? bad.bad_seq : '?'}`),
+        h('span', { class: 'muted' }, ` · checked ${hms(new Date().toISOString())} · ${ms} ms`)),
+      h('div', { class: 'muted' }, v ? `Server: ${pl(Number(v.count) || 0, 'entry', 'entries')} ${v.ok ? 'match' : 'checked – ' + (REASON_TEXT[v.reason] || v.reason)}` : 'Server: not reachable'),
+      h('div', { class: 'muted' }, here ? `This browser recomputed every SHA-256 hash: ${here.ok ? 'all match' : REASON_TEXT[here.reason] || here.reason}` : 'This browser cannot recompute hashes here (needs https) – server check only'));
+  }
+
+  async function exportAudit() {
+    try {
+      const [a, v] = await Promise.all([
+        fetch('/api/audit?session=' + encodeURIComponent(SESSION), { cache: 'no-store' }).then((r) => r.json()),
+        fetch('/api/audit/verify?session=' + encodeURIComponent(SESSION), { cache: 'no-store' }).then((r) => r.json()),
+      ]);
+      const doc = {
+        format: 'shopz-audit/1', session_id: SESSION, exported_at: new Date().toISOString(), demo_data: !isLive(),
+        hash_rule: 'hash = sha256(prev_hash + canonicalJson(event without hash)), keys sorted, genesis = 64 × "0"',
+        verify: v, events: a.events || [],
+      };
+      const url = URL.createObjectURL(new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' }));
+      const link = h('a', { href: url, download: `shopz-audit-${SESSION.slice(0, 8)}.json` });
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      toast(`Exported ${pl((a.events || []).length, 'entry', 'entries')}`, 'info', 1800);
+    } catch (err) {
+      toast('Export failed: ' + (err && err.message ? err.message : 'network error'), 'error');
+    }
+  }
+  $('verifyBtn').addEventListener('click', verifyAgain);
+  $('exportBtn').addEventListener('click', exportAudit);
 
   /* ------------------------------------------------------------------ SSE */
   let curState = 'IDLE';
@@ -1435,6 +2109,12 @@
       refreshVerify();
     },
     audit(d) { addAudit(d.event || d, true); },
+    cart(d) {
+      setCartData(d.cart);
+      if (d.change === 'added') showCartAdded(d);
+      if (d.open) { showCartSummary(d.cart); if (cartItems()) setCart(true); }
+    },
+    cart_order(d) { showCartOrderCard(d); refreshVerify(); renderQuick(); },
     error(d) { toast((d && d.message) || 'Agent error', 'error'); },
   };
 
@@ -1455,7 +2135,7 @@
         const r = await fetch('/api/poll?session=' + encodeURIComponent(SESSION) + '&since=' + pollSince + '&mode=' + encodeURIComponent(MODE), { cache: 'no-store' });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const j = await r.json();
-        if (!wasLive) { retry = 0; wasLive = true; setConn('live'); backfillAudit(); refreshVerify(); }
+        if (!wasLive) { retry = 0; wasLive = true; setConn('live'); backfillAudit(); refreshVerify(); loadCart(); }
         pollSince = j.next;
         for (const ev of j.events || []) {
           const fn = HANDLERS[ev.type];
@@ -1479,6 +2159,7 @@
       setConn('live');
       backfillAudit();
       refreshVerify();
+      loadCart();
     };
     es.onerror = (e) => {
       if (e && typeof e.data === 'string') return; // a server-sent `event: error` message, not a connection problem
@@ -1533,8 +2214,9 @@
     }
     if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
     if (e.key === '?') { e.preventDefault(); toggleHelp(); return; }
-    if (e.key === 'Escape') { toggleHelp(false); setDrawer(false); return; }
+    if (e.key === 'Escape') { toggleHelp(false); setDrawer(false); setCart(false); return; }
     if (e.code === 'KeyA' && !e.shiftKey) { setDrawer(!drawer.classList.contains('open')); return; }
+    if (e.code === 'KeyC' && !e.shiftKey && !isLive()) { setCart(!sheet.classList.contains('open')); return; }
     if (e.code === 'KeyM') { toggleMute(); return; }
     if (e.code === 'KeyP' && e.shiftKey) { e.preventDefault(); priceBump(); return; }
     if (e.code === 'KeyR' && e.shiftKey) { e.preventDefault(); resetAll(); }
@@ -1592,7 +2274,11 @@
   $('actBtn').addEventListener('click', (e) => { setDrawer(!drawer.classList.contains('open')); e.currentTarget.blur(); });
   $('drawerClose').innerHTML = icon('x');
   $('drawerClose').addEventListener('click', () => setDrawer(false));
-  $('scrim').addEventListener('click', () => setDrawer(false));
+  $('scrim').addEventListener('click', () => { setDrawer(false); setCart(false); });
+  $('cartIco').innerHTML = icon('cart');
+  $('cartBtn').addEventListener('click', (e) => { setCart(!sheet.classList.contains('open')); e.currentTarget.blur(); });
+  $('cartClose').innerHTML = icon('x');
+  $('cartClose').addEventListener('click', () => setCart(false));
   /* ------------------------------------------------------------------ mode + allowed stores (live web) */
   function applyMode() {
     document.body.classList.toggle('mode-live', isLive());
@@ -1610,6 +2296,7 @@
       note.hidden = false;
       note.textContent = LIVE_NOTICE + '.';
       $('storesSec').hidden = false;
+      $('cartBtn').hidden = true;
       loadStores();
     }
     fill($('welcomeChips'), chipButtons(isLive() ? LIVE_CHIPS : START_CHIPS));

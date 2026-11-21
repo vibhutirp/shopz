@@ -1,7 +1,10 @@
 // Shopz orchestrator: one state machine per session (docs/PRD.md §2 demo script).
 // CLARIFY → SEARCH → NARRATE ⇄ NAVIGATE/ANSWER → AWAIT_CHOICE → VERIFY → POLICY → APPROVE → CHECKOUT → DONE.
 // Only user intents trigger actions. Page content is read, quoted and audited, never obeyed.
-import { route, detectCategory, isFillerOnly } from './intents.js';
+import { route, detectCategory, isFillerOnly, parseTarget, normalize } from './intents.js';
+import {
+  createCart, addItem, setQty, clearLines, cartTotals, cartView, findLine, lineTotals,
+} from './cart.js';
 import { parseDeadline, parseBudget, shortDate, daysUntil } from './dates.js';
 import { groundedAnswer, detectInjection, verifySpan } from './answer.js';
 import {
@@ -163,6 +166,7 @@ export function createOrchestrator({
       sentences: new Map(), replies: null, lastSayId: null, bargePromise: null,
       request: null, clarify: null, options: [], current: -1, openUrl: null, history: [],
       firstSeen: {}, lastSeen: {}, pending: null, offeredIndex: null, chips: [], constraintChips: [], lastOrder: null,
+      cart: createCart(),
     };
   }
   function getSession(id) {
@@ -448,14 +452,14 @@ export function createOrchestrator({
       session_id: s.id, state: s.state, option_index: s.current >= 0 ? s.current : null, mode: s.mode,
       options: s.options, first_seen: { ...s.firstSeen }, last_seen: { ...s.lastSeen },
       request: s.request ? { category: s.request.category, budget: s.request.budget ?? null, deadline_iso: s.request.deadline_iso ?? null } : null,
-      pending: s.pending ? { sku: s.pending.opt.sku, total: s.pending.totals.total } : null,
-      chips: s.chips, constraints: s.constraintChips, last_order: s.lastOrder,
+      pending: s.pending ? { kind: s.pending.kind || 'item', sku: s.pending.opt?.sku ?? null, total: s.pending.totals.total } : null,
+      chips: s.chips, constraints: s.constraintChips, last_order: s.lastOrder, cart: cartView(s.cart),
     };
   }
 
   // ---------------------------------------------------------------- routing
   async function processText(s, text) {
-    const ctx = { state: s.state, optionCount: s.options.length || 3, options: s.options.map((o) => ({ brand: o.brand, title: o.title })) };
+    const ctx = { state: s.state, optionCount: s.options.length || 3, options: s.options.map((o) => ({ brand: o.brand, title: o.title })), cartCount: s.cart.lines.length };
     let intents = route(text, ctx);
     if (!intents.length) {
       if (isFillerOnly(text)) return; // "Wait." – speech already stopped, nothing to do
@@ -509,6 +513,11 @@ export function createOrchestrator({
       case 'confirm': return confirm(s, a.transcript ?? text);
       case 'cancel': return cancel(s, text);
       case 'alternative': return alternative(s, a);
+      case 'cart_add': return cartAdd(s, a);
+      case 'cart_remove': return cartRemove(s, a);
+      case 'cart_qty': return cartQty(s, a);
+      case 'cart_show': return cartShow(s);
+      case 'cart_checkout': return cartCheckout(s);
       default: say(s, helpLine(s)); return undefined;
     }
   }
@@ -737,6 +746,12 @@ export function createOrchestrator({
     const p = s.pending;
     if (!p) return;
     s.pending = null;
+    if (p.kind === 'cart') {
+      await log(s, 'approval_denied', 'user', reason === 'cart_changed' ? 'Cart changed, so the pending approval no longer applies' : 'User moved on without approving the cart', {
+        reason, scope: 'cart', total: p.totals.total, channel: 'voice', line_ids: p.lines.map((l) => l.line_id),
+      });
+      return;
+    }
     await log(s, 'approval_denied', 'user', reason === 'user_chose_alternative' ? 'User chose a different option instead' : 'User moved on without approving', {
       reason, sku: p.opt.sku, total: p.totals.total, channel: 'voice',
     }, { sku: p.opt.sku });
@@ -1016,14 +1031,7 @@ export function createOrchestrator({
 
     say(s, summary, null, idx);
     const rules = decision.rules;
-    let reason;
-    if (rules.includes('total_over_limit')) reason = `That's over your ${money(limit)} auto-buy limit.`;
-    else if (rules.includes('price_increased_since_first_seen')) reason = 'The price went up, so I need your OK.';
-    else if (rules.includes('daily_order_limit')) reason = "You've reached today's order limit, so I need your OK.";
-    else if (rules.includes('new_merchant')) reason = 'This is a new store for you, so I need your OK.';
-    else if (rules.includes('quantity_gt_2')) reason = "That's more than two items, so I need your OK.";
-    else reason = 'This one needs your OK.';
-    say(s, reason);
+    say(s, approvalReason(rules, limit));
     const alt = cheapestAlternative(s, opt, limit);
     pending.lastSayId = say(s, alt
       ? `Say '${APPROVAL_PHRASE}' to buy, or I can get the ${alt.opt.brand || spokenTitle(alt.opt.title)} at ${money(alt.price)} instead.`
@@ -1043,6 +1051,7 @@ export function createOrchestrator({
   async function confirm(s, transcript) {
     if (s.state !== 'APPROVE' || !s.pending) { say(s, "There's nothing waiting for your approval right now."); return undefined; }
     if (s.pending.requestedTurn === s.turn) return undefined; // must come after the total was spoken, not in the same breath
+    if (s.pending.kind === 'cart') return confirmCart(s, transcript);
     const { policy: pol } = await getPolicy();
     const timeout = Number(pol?.approval?.timeout_s) || 0;
     const p = s.pending;
@@ -1066,6 +1075,12 @@ export function createOrchestrator({
     if (s.state === 'APPROVE' && s.pending) {
       const p = s.pending;
       s.pending = null;
+      if (p.kind === 'cart') {
+        await log(s, 'approval_denied', 'user', `User declined the cart checkout: "${clip(text, 80)}"`, { reason: 'user_cancelled', scope: 'cart', channel: 'voice', transcript: text, total: p.totals.total, line_ids: p.lines.map((l) => l.line_id) });
+        say(s, "Okay, I won't check out. Your cart is still there.");
+        setState(s, s.options.length ? 'AWAIT_CHOICE' : 'IDLE');
+        return undefined;
+      }
       await log(s, 'approval_denied', 'user', `User declined: "${clip(text, 80)}"`, { reason: 'user_cancelled', channel: 'voice', transcript: text, sku: p.opt.sku, total: p.totals.total }, { sku: p.opt.sku });
       say(s, "Okay, I won't buy it.");
       setState(s, s.options.length > 1 ? 'AWAIT_CHOICE' : 'IDLE');
@@ -1087,12 +1102,447 @@ export function createOrchestrator({
     if (idx < 0 && hint && !['cheaper', 'other'].includes(hint)) {
       idx = s.options.findIndex((o) => String(o.brand || '').toLowerCase() === hint || String(o.title || '').toLowerCase().includes(hint));
     }
-    const base = s.pending ? s.pending.opt : currentOption(s);
+    const base = s.pending && s.pending.opt ? s.pending.opt : currentOption(s);
     if (idx < 0) idx = s.pending?.alternativeIndex ?? s.offeredIndex ?? -1;
     if (idx < 0 && base) idx = cheapestAlternative(s, base, null)?.index ?? -1;
     if (idx < 0 || !s.options[idx]) { say(s, "I don't have another option that fits."); return undefined; }
     if (s.state === 'APPROVE' && s.pending) await dropApproval(s, 'user_chose_alternative');
     return selectOption(s, idx);
+  }
+
+
+  // ---------------------------------------------------------------- cart
+  function approvalReason(rules, limit, { cart = false } = {}) {
+    if (rules.includes('total_over_limit')) return `That's over your ${money(limit)} auto-buy limit.`;
+    if (rules.includes('price_increased_since_first_seen')) return cart ? 'A price went up, so I need your OK.' : 'The price went up, so I need your OK.';
+    if (rules.includes('daily_order_limit')) return cart ? "That would go past today's order limit, so I need your OK." : "You've reached today's order limit, so I need your OK.";
+    if (rules.includes('new_merchant')) return 'This is a new store for you, so I need your OK.';
+    if (rules.includes('quantity_gt_2')) return cart ? "That's more than two of one item, so I need your OK." : "That's more than two items, so I need your OK.";
+    return cart ? 'This cart needs your OK.' : 'This one needs your OK.';
+  }
+
+  const itemWord = (n) => `${n} item${n === 1 ? '' : 's'}`;
+  function emitCart(s, extra = {}) {
+    emit(s.id, 'cart', { cart: cartView(s.cart), ...extra });
+  }
+  function cartLineFacts(line) {
+    return {
+      line_id: line.line_id, sku: line.sku, title: line.title, merchant_id: line.merchant_id, store_name: line.store_name, qty: line.qty,
+      unit_price: line.unit_price, currency: line.currency, price_seen_at: line.seen_at, snapshot_id: line.snapshot_id, source: line.source,
+    };
+  }
+  function cartSig(cart) {
+    return cart.lines.map((l) => `${l.line_id}:${l.qty}`).join('|');
+  }
+  /** A pending cart approval is only valid for the cart it was asked for. */
+  async function cartChanged(s) {
+    if (s.pending && s.pending.kind === 'cart') {
+      await dropApproval(s, 'cart_changed');
+      if (s.state === 'APPROVE') setState(s, s.options.length ? 'AWAIT_CHOICE' : 'IDLE');
+    }
+  }
+
+  /** The product a phrase means: an option ("the second one", "the Kestrel", "this"), or the usual item of a category ("the coffee"). */
+  async function itemForTarget(s, target) {
+    const t = normalize(target);
+    const opts = s.options;
+    const ctx = { optionCount: opts.length || 3, options: opts.map((o) => ({ brand: o.brand, title: o.title })) };
+    const tg = opts.length ? parseTarget(t, ctx) : null;
+    if (tg && tg.index != null && opts[tg.index]) return { opt: opts[tg.index], index: tg.index };
+    const cur = currentOption(s);
+    const category = detectCategory(t);
+    if (category && !(cur && cur.category === category)) {
+      const idx = opts.findIndex((o) => o.category === category);
+      if (idx >= 0) return { opt: opts[idx], index: idx };
+      const pref = await prefs.usual(USER_ID, category);
+      const v = pref?.value || {};
+      const merchant = merchants.find((m) => m.id === v.merchant_id);
+      if (!pref || !merchant) return { missing: category };
+      const base = String(merchant.base).replace(/\/+$/, '');
+      return {
+        usual: pref,
+        opt: {
+          option_id: 'opt_usual', sku: v.sku, merchant_id: merchant.id, store_name: merchant.name, title: v.title, brand: v.brand ?? null,
+          category, demo_data: true, url: `${base}/p/${v.sku}`, seller: merchant.name, in_stock: true,
+          price: { amount: Number(v.last_price ?? v.price), currency: 'USD', observed_at: null, snapshot_id: null },
+          delivery: { eta_date: null, shipping_cost: 0 },
+        },
+        index: null,
+      };
+    }
+    if (cur) return { opt: cur, index: s.current };
+    if (opts.length === 1) return { opt: opts[0], index: 0 };
+    return null;
+  }
+
+  /** The price to put on the line: the newest one read on the page; for an item never opened, read its page now. */
+  async function seenPrice(s, found) {
+    const { opt } = found;
+    const seen = s.lastSeen[opt.sku];
+    if (seen && Number.isFinite(Number(seen.price))) return { price: Number(seen.price), seen_at: seen.ts, snapshot_id: seen.snapshot_id, price_source: 'product_page' };
+    const back = s.openUrl;
+    await openPage(s, opt, null, 'cart_add');
+    const snap = await readSection(s, 'price', opt);
+    const price = fieldNum(snap, 'price');
+    if (price != null) await observePrice(s, opt, price, snap, { at: 'cart_add' });
+    if (back && back !== opt.url) {
+      await quiet(s, 'open', back);
+      s.openUrl = back;
+      s.history.push(back);
+    }
+    if (price == null) {
+      const p = Number(opt.price?.amount);
+      return Number.isFinite(p) ? { price: p, seen_at: opt.price?.observed_at || new Date().toISOString(), snapshot_id: null, price_source: 'store_search' } : null;
+    }
+    return { price, seen_at: snap.taken_at, snapshot_id: snap.snapshot_id, price_source: 'product_page' };
+  }
+
+  async function cartAdd(s, { target = 'this', qty = 1 } = {}) {
+    s.autoAdvance = false;
+    const found = await itemForTarget(s, target);
+    if (!found) {
+      say(s, s.options.length ? 'Which one should I add? Say the first, second or third one.' : "Tell me what you're looking for first, then I can add it to your cart.");
+      return undefined;
+    }
+    if (found.missing) {
+      say(s, `I haven't found any ${CATEGORY_LABEL[found.missing] || found.missing} yet. Tell me what you need and I'll show you options to add.`);
+      return undefined;
+    }
+    const { opt } = found;
+    const seen = await seenPrice(s, found);
+    if (!seen) { say(s, `I couldn't read the price of the ${spokenTitle(opt.title)}, so I didn't add it.`); return undefined; }
+    await cartChanged(s);
+    const first = s.firstSeen[opt.sku]?.price;
+    const r = addItem(s.cart, {
+      sku: opt.sku, title: opt.title, brand: opt.brand, category: opt.category || s.request?.category || null,
+      merchant_id: opt.merchant_id, store_name: opt.store_name, url: opt.url, image_url: opt.image_url || null,
+      unit_price: seen.price, currency: 'USD', seen_at: seen.seen_at, snapshot_id: seen.snapshot_id,
+      first_seen_price: Number.isFinite(Number(first)) ? Number(first) : seen.price,
+      shipping_cost: Number(opt.delivery?.shipping_cost) || 0, source: 'demo',
+    }, qty);
+    const totals = cartTotals(s.cart);
+    const { line } = r;
+    await log(s, 'cart_item_added', 'agent', `Added ${r.added} × ${spokenTitle(line.title)} at ${money(seen.price)} to the cart`, {
+      ...cartLineFacts(line), qty_added: r.added, qty_before: r.qty_before, price_source: seen.price_source,
+      option_index: found.index, from_usual: Boolean(found.usual), cart_items: totals.item_count, cart_total: totals.total, currency: 'USD',
+    }, { sku: line.sku, snapshot_id: line.snapshot_id ?? null });
+    emitCart(s, { change: 'added', line_id: line.line_id, added: r.added });
+    if (!r.added) {
+      say(s, `You already have ${line.qty} of the ${spokenTitle(line.title)}, that's the most I can add.`);
+      return undefined;
+    }
+    const what = r.added > 1 ? `${r.added} of the ${spokenTitle(line.title)}` : `the ${spokenTitle(line.title)}`;
+    say(s, `Added ${what}. Your cart has ${itemWord(totals.item_count)}, ${money(totals.total)} with tax.`);
+    return undefined;
+  }
+
+  function cartSummaryLine(s) {
+    const t = cartTotals(s.cart);
+    const parts = s.cart.lines.map((l) => `${l.qty} ${spokenTitle(l.title)} from ${l.store_name}`);
+    const list = parts.length <= 1 ? parts.join('') : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+    return `Your cart: ${list}. Total ${money(t.total)} with tax, ${t.shipping ? `${money(t.shipping)} shipping` : 'free shipping'}.`;
+  }
+
+  async function cartShow(s) {
+    s.autoAdvance = false;
+    if (!s.cart.lines.length) { say(s, 'Your cart is empty.'); emitCart(s, { open: true }); return undefined; }
+    say(s, cartSummaryLine(s));
+    emitCart(s, { open: true });
+    return undefined;
+  }
+
+  async function removeFromCart(s, line, via) {
+    const r = setQty(s.cart, line.line_id, 0);
+    if (!r) return null;
+    const totals = cartTotals(s.cart);
+    await log(s, 'cart_item_removed', via === 'panel' ? 'user' : 'agent', `Removed ${spokenTitle(line.title)} from the cart`, {
+      ...cartLineFacts(line), qty_before: r.qty_before, via, cart_items: totals.item_count, cart_total: totals.total, currency: 'USD',
+    }, { sku: line.sku });
+    emitCart(s, { change: 'removed', line_id: line.line_id });
+    return totals;
+  }
+
+  async function cartRemove(s, { target = 'it', all = false } = {}) {
+    s.autoAdvance = false;
+    if (!s.cart.lines.length) { say(s, 'Your cart is already empty.'); return undefined; }
+    await cartChanged(s);
+    if (all) {
+      for (const line of [...s.cart.lines]) await removeFromCart(s, line, 'voice');
+      say(s, 'Done, your cart is empty.');
+      return undefined;
+    }
+    const line = findLine(s.cart, target);
+    if (!line) { say(s, `I don't see that in your cart. ${cartSummaryLine(s)}`); return undefined; }
+    const totals = await removeFromCart(s, line, 'voice');
+    say(s, totals.item_count
+      ? `Removed the ${spokenTitle(line.title)}. Your cart has ${itemWord(totals.item_count)}, ${money(totals.total)} with tax.`
+      : `Removed the ${spokenTitle(line.title)}. Your cart is empty now.`);
+    return undefined;
+  }
+
+  async function changeQty(s, line, qty, via) {
+    if (qty <= 0) return removeFromCart(s, line, via);
+    const r = setQty(s.cart, line.line_id, qty);
+    if (!r) return null;
+    const totals = cartTotals(s.cart);
+    await log(s, 'cart_quantity_changed', via === 'panel' ? 'user' : 'agent', `Changed ${spokenTitle(line.title)} from ${r.qty_before} to ${r.line.qty}`, {
+      ...cartLineFacts(r.line), qty_before: r.qty_before, via, cart_items: totals.item_count, cart_total: totals.total, currency: 'USD',
+    }, { sku: line.sku });
+    emitCart(s, { change: 'quantity', line_id: line.line_id });
+    return totals;
+  }
+
+  async function cartQty(s, { target = 'it', qty } = {}) {
+    s.autoAdvance = false;
+    if (!s.cart.lines.length) { say(s, 'Your cart is empty.'); return undefined; }
+    const line = findLine(s.cart, target);
+    if (!line) { say(s, `I don't see that in your cart. ${cartSummaryLine(s)}`); return undefined; }
+    await cartChanged(s);
+    const totals = await changeQty(s, line, qty, 'voice');
+    if (!totals) return undefined;
+    say(s, qty <= 0
+      ? `Removed the ${spokenTitle(line.title)}.`
+      : `Now ${line.qty} of the ${spokenTitle(line.title)}. Your cart total is ${money(totals.total)} with tax.`);
+    return undefined;
+  }
+
+  /** Panel: quantity stepper and remove button in the cart view. Same audit trail, no speech. */
+  function cartUpdate(session_id, { op, line_id, qty } = {}) {
+    const s = getSession(session_id);
+    return enqueue(s, async () => {
+      await ensureStarted(s);
+      const line = s.cart.lines.find((l) => l.line_id === line_id);
+      if (!line) return { ok: false, error: 'unknown line', cart: cartView(s.cart) };
+      await cartChanged(s);
+      if (op === 'remove') await removeFromCart(s, line, 'panel');
+      else if (op === 'qty' && Number.isFinite(Number(qty))) await changeQty(s, line, Math.floor(Number(qty)), 'panel');
+      else return { ok: false, error: 'op must be qty or remove', cart: cartView(s.cart) };
+      return { ok: true, cart: cartView(s.cart) };
+    });
+  }
+
+  async function cartCheckout(s) {
+    s.autoAdvance = false;
+    if (!s.cart.lines.length) { say(s, 'Your cart is empty. Add something first.'); return undefined; }
+    const lines = s.cart.lines.filter((l) => l.source !== 'external');
+    if (!lines.length) { say(s, 'Those items are from other stores. Open them at the store to buy.'); return undefined; }
+    if (s.pending) await dropApproval(s, s.pending.kind === 'cart' ? 'cart_rechecked' : 'user_navigated_away');
+    const before = cartTotals(s.cart);
+    setState(s, 'VERIFY', null);
+    await log(s, 'cart_checkout_started', 'agent', `Checking out the cart: ${itemWord(before.item_count)} from ${before.stores.map((x) => x.store_name).join(' and ')} (${money(before.total)} as added)`, {
+      lines: lines.map(cartLineFacts), total_as_added: before.total, subtotal: before.subtotal, tax: before.tax, shipping: before.shipping, currency: 'USD',
+      stores: before.stores.map((x) => ({ merchant_id: x.merchant_id, store_name: x.store_name, items: x.item_count, total: x.total })),
+    });
+    const stores = before.stores.map((x) => x.store_name);
+    say(s, `Checking out ${itemWord(before.item_count)} from ${joinAnd(stores)}. I'll re-check every page first.`);
+
+    // 1. re-check price and stock of every line on its page
+    const prices = {};
+    const stock = {};
+    const changed = [];
+    for (const line of lines) {
+      const opt = { sku: line.sku, url: line.url, title: line.title, store_name: line.store_name, merchant_id: line.merchant_id, price: { amount: line.unit_price } };
+      if (s.openUrl !== line.url) await openPage(s, opt, null, 'cart_verify');
+      await callBrowser(s, 'reload');
+      await log(s, 'page_reload', 'agent', `Reloaded ${spokenTitle(line.title)} to re-check price and stock`, { url: line.url, sku: line.sku, line_id: line.line_id }, { sku: line.sku });
+      const snap = await readSection(s, 'price', opt);
+      const price = fieldNum(snap, 'price');
+      if (price == null) {
+        say(s, `I couldn't re-check the price of the ${spokenTitle(line.title)}, so I won't check out right now.`);
+        setState(s, s.options.length ? 'AWAIT_CHOICE' : 'IDLE');
+        return undefined;
+      }
+      const inStock = fieldBool(snap, 'in_stock') ?? true;
+      const ch = Math.abs(Number(line.unit_price) - price) >= 0.005;
+      await observePrice(s, opt, price, snap, {
+        previous_price: line.unit_price, previous_observed_at: line.seen_at, previous_snapshot_id: line.snapshot_id, changed: ch, at: 'cart_verify', line_id: line.line_id,
+      });
+      await log(s, 'stock_checked', 'agent', inStock ? `${spokenTitle(line.title)} is in stock` : `${spokenTitle(line.title)} is out of stock`, {
+        sku: line.sku, in_stock: inStock, snapshot_id: snap.snapshot_id, snapshot_sha256: snap.sha256, line_id: line.line_id,
+      }, { snapshot_id: snap.snapshot_id, sku: line.sku });
+      prices[line.line_id] = price;
+      stock[line.line_id] = inStock;
+      if (ch) changed.push({ line, before: line.unit_price, after: price, at: snap.taken_at });
+    }
+
+    // 2. the same purchase policy as a single item, for every line, plus the whole cart against the limits
+    setState(s, 'POLICY', null);
+    const now = cartTotals(s.cart, prices);
+    const { evaluate: evalFn, policy: pol } = await getPolicy();
+    const ordersToday = await store.orders.countToday(USER_ID);
+    const perLine = [];
+    for (const line of lines) {
+      perLine.push(await evalFn({
+        policy: pol, merchant_id: line.merchant_id, category: line.category, qty: line.qty, totals: lineTotals(line, prices[line.line_id]),
+        first_seen_price: line.first_seen_price, current_price: prices[line.line_id], in_stock: stock[line.line_id], orders_today: ordersToday,
+        instruction_from_page: false, known_merchant: true,
+      }));
+    }
+    // One order per line: the day's order count must hold for all of them.
+    const countedToday = ordersToday + lines.length - 1;
+    const whole = await evalFn({
+      policy: pol, merchant_id: lines[0].merchant_id, category: lines[0].category, qty: Math.max(...lines.map((l) => l.qty)),
+      totals: { subtotal: now.subtotal, tax: now.tax, shipping: now.shipping, total: now.total, currency: 'USD' },
+      first_seen_price: null, current_price: null, in_stock: lines.every((l) => stock[l.line_id] !== false), orders_today: countedToday,
+      instruction_from_page: false, known_merchant: true,
+    });
+    const all = [...perLine, whole];
+    const rules = [...new Set(all.flatMap((d) => d.rules || []))];
+    const decision = all.some((d) => d.decision === 'DENY') ? 'DENY' : all.some((d) => d.decision === 'REQUIRE_APPROVAL') || rules.length ? 'REQUIRE_APPROVAL' : 'AUTO_APPROVE';
+    const limit = whole.limit ?? pol?.auto_approve?.max_total ?? null;
+    const lineFacts = lines.map((l, i) => ({
+      line_id: l.line_id, sku: l.sku, title: l.title, qty: l.qty, merchant_id: l.merchant_id, store_name: l.store_name,
+      price_added: l.unit_price, price_now: prices[l.line_id], in_stock: stock[l.line_id], decision: perLine[i].decision, rules: perLine[i].rules,
+      total: lineTotals(l, prices[l.line_id]).total,
+    }));
+    const inputs = {
+      scope: 'cart', policy_id: pol?.policy_id ?? null, policy_version: pol?.version ?? null, limit, total: now.total, total_as_added: before.total,
+      orders_today: ordersToday, orders_to_place: lines.length, orders_today_counted: countedToday,
+      max_orders_per_day: pol?.auto_approve?.max_orders_per_day ?? null, approved_merchants: [...(pol?.approved_merchants || [])],
+      max_qty: Math.max(...lines.map((l) => l.qty)), currency: 'USD',
+    };
+    const polEvent = await log(s, 'policy_decision', 'policy', `${decision}${rules.length ? ` (${rules.join(', ')})` : ''}: cart total ${money(now.total)}, auto-buy ≤ ${money(limit)}`, {
+      scope: 'cart', decision, rules, inputs, limit, total: now.total, total_as_added: before.total, currency: 'USD',
+      policy_id: pol?.policy_id ?? null, policy_version: pol?.version ?? null, lines: lineFacts,
+    });
+    for (const c of changed) {
+      emit(s.id, 'price_diff', { sku: c.line.sku, title: c.line.title, before: c.before, after: c.after, before_ts: c.line.seen_at, after_ts: c.at, scope: 'cart' });
+    }
+    emit(s.id, 'policy', {
+      scope: 'cart', decision, rules, inputs, total: now.total, total_as_added: before.total, currency: 'USD', limit, lines: lineFacts,
+      stores: now.stores.map((x) => ({ merchant_id: x.merchant_id, store_name: x.store_name, items: x.item_count, total: x.total })),
+    });
+    for (const c of changed) say(s, `The ${spokenTitle(c.line.title)} changed since you added it: ${money(c.before)} then, ${money(c.after)} now.`);
+
+    if (decision === 'DENY') {
+      const out = lines.filter((l) => stock[l.line_id] === false);
+      if (out.length) say(s, `The ${joinAnd(out.map((l) => spokenTitle(l.title)))} ${out.length === 1 ? 'is' : 'are'} out of stock now, so I can't check out. Remove ${out.length === 1 ? 'it' : 'them'} and I'll try again.`);
+      else say(s, `My spending policy blocks this cart (${rules.join(', ').replace(/_/g, ' ')}), so I won't check out.`);
+      setState(s, s.options.length ? 'AWAIT_CHOICE' : 'IDLE');
+      return undefined;
+    }
+
+    const orderWord = lines.length === 1 ? 'one order' : `${NUMBER_WORDS[lines.length] || lines.length} orders`;
+    const summary = `Cart total is ${money(now.total)} with tax, ${now.shipping ? `${money(now.shipping)} shipping` : 'free shipping'}${changed.length ? `, it was ${money(before.total)} when you added the items` : ''}.`;
+    const pending = {
+      kind: 'cart', index: null, lines: lines.map((l) => ({ ...l })), prices, stock, totals: now, before, changed, decision: { decision, rules },
+      polEvent, sig: cartSig(s.cart), requestedTurn: s.turn, requestedAt: Date.now(), lastSayId: null,
+    };
+    say(s, summary);
+    if (decision === 'AUTO_APPROVE') {
+      say(s, `That's under your limit, so I'm placing ${orderWord} now.`);
+      return checkoutCart(s, pending, { mode: 'auto' });
+    }
+    say(s, approvalReason(rules, limit, { cart: true }));
+    pending.lastSayId = say(s, `Say '${APPROVAL_PHRASE}' to place ${orderWord}.`);
+    s.pending = pending;
+    s.offeredIndex = null;
+    await log(s, 'approval_requested', 'agent', `Asked for "${APPROVAL_PHRASE}" (cart total ${money(now.total)})`, {
+      scope: 'cart', total: now.total, total_as_added: before.total, currency: 'USD', rules, phrase: pol?.approval?.phrase || APPROVAL_PHRASE,
+      channel: pol?.approval?.channel || 'voice', timeout_s: pol?.approval?.timeout_s ?? null, line_ids: lines.map((l) => l.line_id),
+      policy_decision_event_id: polEvent?.event_id ?? null,
+    }, { event_id: polEvent?.event_id ?? null });
+    setState(s, 'APPROVE', null);
+    return undefined;
+  }
+
+  async function confirmCart(s, transcript) {
+    const { policy: pol } = await getPolicy();
+    const timeout = Number(pol?.approval?.timeout_s) || 0;
+    const p = s.pending;
+    if (p.sig !== cartSig(s.cart)) {
+      s.pending = null;
+      await log(s, 'approval_denied', 'system', 'Cart changed after the approval was requested', { reason: 'cart_changed', scope: 'cart', total: p.totals.total });
+      say(s, 'Your cart changed, so let me check it again.');
+      return cartCheckout(s);
+    }
+    if (timeout && Date.now() - p.requestedAt > timeout * 1000) {
+      s.pending = null;
+      await log(s, 'approval_denied', 'system', 'Approval window expired', { reason: 'timeout', scope: 'cart', total: p.totals.total, timeout_s: timeout });
+      say(s, 'That approval window expired, so let me check the cart again.');
+      return cartCheckout(s);
+    }
+    const ev = await log(s, 'approval_granted', 'user', `User said "${clip(transcript, 80)}"`, {
+      scope: 'cart', channel: 'voice', transcript, phrase: APPROVAL_PHRASE, policy_version: pol?.version ?? null, policy_id: pol?.policy_id ?? null,
+      total: p.totals.total, line_ids: p.lines.map((l) => l.line_id), policy_decision_event_id: p.polEvent?.event_id ?? null,
+    }, { event_id: p.polEvent?.event_id ?? null });
+    s.pending = null;
+    say(s, 'Confirmed. Placing the orders.');
+    return checkoutCart(s, p, { mode: 'user_explicit', channel: 'voice', transcript, event_id: ev?.event_id ?? null });
+  }
+
+  async function checkoutCart(s, p, approval) {
+    setState(s, 'CHECKOUT', null);
+    const orders = [];
+    let failed = null;
+    for (const line of p.lines) {
+      const price = p.prices[line.line_id];
+      const expected = lineTotals(line, price);
+      await log(s, 'checkout_started', 'agent', `Checking out ${line.qty} × ${spokenTitle(line.title)} at ${line.store_name} (${money(expected.total)})`, {
+        sku: line.sku, url: line.url, qty: line.qty, merchant_id: line.merchant_id, total: expected.total, approval_mode: approval.mode, scope: 'cart', line_id: line.line_id,
+      }, { sku: line.sku });
+      let res = null;
+      try {
+        res = await callBrowser(s, 'checkout', { url: line.url, sku: line.sku, qty: line.qty });
+      } catch (err) {
+        res = { error: err };
+      }
+      for (const st of (res && res.steps) || []) {
+        await log(s, 'checkout_step', 'agent', `Checkout step: ${st.step}${st.ok === false ? ' (failed)' : ''}`, { step: st.step, ok: st.ok !== false, ms: st.ms ?? null, executor: res.executor ?? null, line_id: line.line_id }, { sku: line.sku });
+      }
+      if (!res || res.error || !res.order_id) {
+        const message = res?.error?.message || 'no order id returned';
+        await log(s, 'error', 'system', `Checkout failed: ${clip(message, 120)}`, { stage: 'cart_checkout', message, sku: line.sku, line_id: line.line_id }, { sku: line.sku });
+        emit(s.id, 'error', { message: `Checkout failed: ${message}` });
+        failed = line;
+        break;
+      }
+      const totals = res.totals || expected;
+      const eta = res.delivery_eta || null;
+      const items = [{ sku: line.sku, title: line.title, qty: line.qty, unit_price: price }];
+      const confirmed = await log(s, 'order_confirmed', 'merchant', `Order ${res.order_id} confirmed (${money(totals.total)})`, {
+        order_id: res.order_id, totals, items, executor: res.executor ?? null, delivery_eta: eta, merchant_id: line.merchant_id, sku: line.sku,
+        confirmation_text: res.confirmation_text ?? null, approval_mode: approval.mode, scope: 'cart', line_id: line.line_id,
+      }, { sku: line.sku, order_id: res.order_id });
+      const order = {
+        order_id: res.order_id, session_id: s.id, user_id: USER_ID, merchant_id: line.merchant_id, store_name: line.store_name, items, totals, delivery_eta: eta,
+        return_policy: null,
+        price_change: { first_seen: line.unit_price, at_checkout: price, disclosed_to_user: Math.abs(line.unit_price - price) >= 0.005 },
+        policy_decision_event_id: p.polEvent?.event_id ?? null,
+        approval: {
+          mode: approval.mode, channel: approval.mode === 'user_explicit' ? (approval.channel || 'voice') : null,
+          transcript: approval.transcript ?? null, event_id: approval.event_id ?? null,
+        },
+        executor: res.executor ?? null, demo_data: true, status: 'confirmed', placed_at: new Date().toISOString(),
+        audit_head_hash: confirmed?.hash ?? null, cart_line_id: line.line_id,
+      };
+      await store.orders.insert(order);
+      orders.push(order);
+    }
+    clearLines(s.cart, orders.map((o) => o.cart_line_id));
+    const paid = orders.reduce((sum, o) => sum + Number(o.totals?.total || 0), 0);
+    const left = cartTotals(s.cart);
+    await log(s, 'cart_checkout_done', failed ? 'system' : 'agent', failed
+      ? `Cart checkout stopped: ${orders.length} of ${p.lines.length} orders placed`
+      : `Cart checked out: ${orders.length} order${orders.length === 1 ? '' : 's'}, ${money(paid)}`, {
+      orders: orders.map((o) => ({ order_id: o.order_id, merchant_id: o.merchant_id, total: o.totals?.total ?? null, line_id: o.cart_line_id })),
+      total: Math.round(paid * 100) / 100, approval_mode: approval.mode, failed_line_id: failed?.line_id ?? null,
+      items_left: left.item_count, currency: 'USD',
+    });
+    if (orders.length) s.lastOrder = orders[orders.length - 1];
+    emit(s.id, 'cart_order', { orders, total: Math.round(paid * 100) / 100, currency: 'USD', approval_mode: approval.mode, failed: failed ? { line_id: failed.line_id, title: failed.title } : null });
+    emitCart(s, { change: 'checkout' });
+    if (failed) {
+      say(s, orders.length
+        ? `I placed ${orders.length} order${orders.length === 1 ? '' : 's'}, but the checkout for the ${spokenTitle(failed.title)} didn't go through. It's still in your cart.`
+        : "The checkout didn't go through, so nothing was bought. Your cart is unchanged.");
+      setState(s, s.options.length ? 'AWAIT_CHOICE' : 'IDLE');
+      return undefined;
+    }
+    const ids = orders.map((o) => `${o.order_id} arrives ${etaPhrase(o.delivery_eta)}`);
+    say(s, `Done. ${orders.length === 1 ? 'Order' : 'Orders'} ${joinAnd(ids)}. You paid ${money(paid)} in total.`);
+    setState(s, 'DONE', null);
+    return undefined;
   }
 
   // ---------------------------------------------------------------- reorder + checkout
@@ -1216,5 +1666,9 @@ export function createOrchestrator({
     if (['SEARCH', 'VERIFY', 'POLICY', 'CHECKOUT', 'NARRATE'].includes(s.state)) setState(s, s.options.length ? 'AWAIT_CHOICE' : 'IDLE');
   }
 
-  return { handle, bargeIn, speaking, speechDone, reset, session };
+  function cart(session_id) {
+    return cartView(getSession(session_id).cart);
+  }
+
+  return { handle, bargeIn, speaking, speechDone, reset, session, cart, cartUpdate };
 }
