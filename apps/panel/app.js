@@ -1173,10 +1173,15 @@
         h('span', { class: 'lbl muted' }, 'when added → now')) : null,
       lines.length ? h('ul', { class: 'cartpol-lines' }, lines.map((l) => {
         const up = isNum(l.price_now) && isNum(l.price_added) && Math.abs(l.price_now - l.price_added) >= 0.005;
+        // line amounts: price × qty, so "2× … $36.80" reads right; the unit price goes next to the store name
+        const q = isNum(Number(l.qty)) && Number(l.qty) > 0 ? Number(l.qty) : 1;
+        const lt = (x) => (isNum(x) ? Math.round(x * q * 100) / 100 : x);
         return h('li', { class: l.in_stock === false ? 'out' : '' },
           h('span', { class: 'q' }, `${l.qty}×`),
           h('span', { class: 'n', title: l.title || '' }, l.title, h('span', { class: 's' }, l.store_name || storeName(l.merchant_id) || '')),
-          h('span', { class: 'p' }, up ? [h('s', null, money(l.price_added)), ' ', h('b', null, money(l.price_now))] : money(l.price_now), l.in_stock === false ? h('span', { class: 'oos' }, 'out of stock') : null));
+          h('span', { class: 'p' }, up ? [h('s', null, money(lt(l.price_added))), ' ', h('b', null, money(lt(l.price_now)))] : money(lt(l.price_now)),
+            q > 1 && isNum(l.price_now) ? h('span', { class: 'each' }, `${money(l.price_now)} each`) : null,
+            l.in_stock === false ? h('span', { class: 'oos' }, 'out of stock') : null));
       })) : null,
       h('ul', { class: 'rules' }, why),
       policyFoot(req, false));
