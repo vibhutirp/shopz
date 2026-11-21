@@ -521,6 +521,11 @@ kbd {
   .cards::-webkit-scrollbar { display: none; }
   .pcard { flex: 0 0 74%; scroll-snap-align: start; }
 }
+@media (max-width: 440px) {
+  /* phone: logo only, so the Demo / Live web switch never sits under the voice pill */
+  .brand { font-size: 0; gap: 0; }
+  .hdr-left { gap: 8px; }
+}
 @media (max-width: 560px) {
   body { font-size: 15px; }
   .hdr { padding: 0 10px 0 14px; gap: 8px; height: 52px; }
@@ -528,7 +533,7 @@ kbd {
   .pill { padding: 0 9px; }
   .mode-switch button { padding: 4px 8px; font-size: 12px; }
   .pill #micPillText { display: none; }
-  .pill-listening #micPillText, .pill-speaking #micPillText { display: inline; }
+  .pill-listening #micPillText { display: inline; }
   .act-btn { padding: 0 10px; gap: 6px; }
   .act-btn-label { display: none; }
   .thread { padding: 18px 14px 18px; gap: 18px; }
