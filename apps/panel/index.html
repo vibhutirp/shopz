@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>Shopz</title>
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="companion.css">
 </head>
 <body>
   <div id="app">
@@ -29,6 +30,11 @@
           <span id="micPillText">Idle</span>
         </div>
         <button id="muteBtn" class="icon-btn" type="button" title="Voice on (M)" aria-pressed="false" aria-label="Mute the agent voice"></button>
+        <button id="companionBtn" class="cart-btn cmp-btn" type="button" aria-pressed="false" title="Connect your browser">
+          <svg class="cmp-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+          <span class="cmp-dot" aria-hidden="true"></span>
+          <span class="cmp-label cart-btn-label">Connect browser</span>
+        </button>
         <button id="cartBtn" class="cart-btn" type="button" aria-controls="cartSheet" aria-expanded="false" title="Your cart" aria-label="Cart, empty">
           <span id="cartIco" class="cart-ico" aria-hidden="true"></span>
           <span class="cart-btn-label">Cart</span>
@@ -145,6 +151,7 @@
     </div>
   </div>
 
+  <script src="companion.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

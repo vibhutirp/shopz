@@ -32,10 +32,13 @@ export const AUDIT_TYPES = Object.freeze([
   'web_search', 'handoff',
   // cart: every change and the checkout of the whole cart are part of the chain
   'cart_item_added', 'cart_item_removed', 'cart_quantity_changed', 'cart_checkout_started', 'cart_checkout_done',
+  // Shopz Companion: the user's own browser as the agent's hands, and the hand-offs to the human (sign-in, check, paying)
+  'companion_connected', 'companion_disconnected', 'browser_action', 'browser_action_refused', 'human_handoff', 'human_resumed', 'cart_checked',
 ]);
 
 export const SSE_TYPES = Object.freeze([
   'state', 'user.utterance', 'agent.say', 'speech.cancel', 'memory', 'constraints', 'options', 'policy', 'price_diff', 'order', 'audit', 'error', 'handoff', 'cart', 'cart_order',
+  'companion', 'companion.action', 'companion.page', 'companion.your_turn', 'companion.turn_done',
 ]);
 
 export const POLICY_DECISIONS = Object.freeze(['AUTO_APPROVE', 'REQUIRE_APPROVAL', 'DENY']);

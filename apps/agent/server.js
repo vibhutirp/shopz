@@ -37,6 +37,9 @@ async function main() {
   const { createOrchestrator } = await import('./src/orchestrator.js');
   const { createLiveOrchestrator, LIVE_NOTICE } = await import('./src/live/orchestrator.js');
   const { shopsFromEnv } = await import('./src/live/shops.js');
+  const { createCompanionHub } = await import('./src/companion/hub.js');
+  const { createSwitchBrowser } = await import('./src/companion/demo-browser.js');
+  const ws = await import('./src/companion/ws.js');
 
   // ---------------------------------------------------------------- SSE hub
   const clients = new Map(); // session_id → Set<res>
@@ -80,8 +83,12 @@ async function main() {
   log('llm', `configured=${llmConfigured ? 'yes' : 'no'}${llmConfigured ? '' : ' (deterministic fallbacks only)'}`);
   log('tts', `piper=${process.env.TTS_URL || 'off'} · polly=${process.env.AWS_REGION ? 'try' : 'off'} · panel falls back to speechSynthesis on 503`);
   const llm = { complete: (args) => llmModule.complete(args) };
+  // Shopz Companion: the user's own Chrome as the agent's hands (extension in apps/companion). Optional – without a
+  // paired browser everything runs exactly as before (controller / server fetches).
+  const companion = createCompanionHub({ audit, emit, log: (m) => log('companion', m) });
+  const demoBrowser = createSwitchBrowser(browser, companion, { isDemoSession: (id) => modeOf(id) === 'demo' });
   const orchestrator = createOrchestrator({
-    audit, prefs, store, browser, merchants, emit, llm,
+    audit, prefs, store, browser: demoBrowser, merchants, emit, llm,
     searchMerchants: search, filterAndRank, evaluate, policy: DEFAULT_POLICY,
   });
   // Live web mode: real stores, read in real time, hand-off instead of a purchase. Demo stays the default.
@@ -89,7 +96,7 @@ async function main() {
   const liveShops = shopsFromEnv();
   const { webSearchFromEnv } = await import('./src/live/websearch.js');
   const webSearch = webSearchFromEnv();
-  const live = createLiveOrchestrator({ audit, emit, browser, evaluate, shops: liveShops, llm: llmConfigured ? llm : null, webSearch });
+  const live = createLiveOrchestrator({ audit, emit, browser, evaluate, shops: liveShops, llm: llmConfigured ? llm : null, webSearch, companion });
   log('live', `default mode=${DEFAULT_MODE} · ${liveShops.length} live stores · local model ${process.env.LIVE_LLM_URL ? 'on' : 'off'} · web search ${webSearch ? 'on' : 'off'}`);
   const modes = new Map(); // session_id → 'demo' | 'live' (set by the panel; a session never switches mid-way)
   function modeOf(session_id, requested) {
@@ -193,16 +200,30 @@ async function main() {
     return events.length ? Number(events[events.length - 1].seq) || 0 : 0;
   }
 
+  /** "done" / "continue" while the agent waits for the human (login, captcha) – answered right away, not queued. */
+  function resumeByVoice(s, text) {
+    const t = companion.pendingTurn(s);
+    if (!t || !t.wait || !companion.isResumeWord(text)) return false;
+    emit(s, 'user.utterance', { text });
+    audit.append(s, 'utterance', 'user', `User: "${String(text).slice(0, 140)}"`, { text, mode: 'resume' }).catch(() => {});
+    return companion.resume(s, 'voice');
+  }
+
   // ---------------------------------------------------------------- routes
   async function api(req, res, url) {
     const p = url.pathname;
     const q = url.searchParams;
 
     if (req.method === 'GET' && p === '/api/health') {
-      return send(res, 200, { ok: true, store: store.kind, browser: browser.mode, llm: llmConfigured, default_mode: DEFAULT_MODE });
+      return send(res, 200, { ok: true, store: store.kind, browser: browser.mode, llm: llmConfigured, default_mode: DEFAULT_MODE, companion: { ws_path: '/api/companion/ws', version: 1 } });
     }
     if (req.method === 'GET' && p === '/api/config') {
       return send(res, 200, { default_mode: DEFAULT_MODE, live: { notice: LIVE_NOTICE, stores: liveShops.map((x) => ({ host: x.host, name: x.name, categories: x.categories })) } });
+    }
+    if (req.method === 'GET' && p === '/api/companion/status') {
+      const s = sid(q.get('session'));
+      if (!s) return send(res, 400, { error: 'session is required' });
+      return send(res, 200, companion.status(s));
     }
     if (req.method === 'GET' && p === '/api/live/shops') {
       const s = sid(q.get('session'));
@@ -292,6 +313,7 @@ async function main() {
         const s = sid(body.session_id);
         const text = typeof body.text === 'string' ? body.text : '';
         if (!s || !text.trim()) return send(res, 400, { error: 'session_id and text are required' });
+        if (resumeByVoice(s, text)) return send(res, 200, { ok: true, resumed: true });
         orch(s, body.mode).handle(s, text, { sync: false }).catch((err) => emit(s, 'error', { message: err.message }));
         return send(res, 200, { ok: true });
       }
@@ -317,6 +339,7 @@ async function main() {
         const text = typeof body.text === 'string' ? body.text : '';
         if (!text.trim()) return send(res, 400, { error: 'text is required' });
         const s = sid(body.session_id) || newSessionId();
+        if (resumeByVoice(s, text)) return send(res, 200, { session_id: s, replies: [], state: orch(s).session(s).state, events: [], resumed: true });
         const before = await lastSeq(s);
         const out = await orch(s, body.mode).handle(s, text, { sync: true });
         const events = newEventsSince(await audit.list(s), before);
@@ -364,6 +387,32 @@ async function main() {
         log('admin', `reset merchants (${results.map((r) => `${r.store}:${r.ok ? 'ok' : 'failed'}`).join(', ')})${s ? ` + session ${s}` : ''}`);
         return send(res, 200, { ok: results.every((r) => r.ok), merchants: results, session_id: s });
       }
+      case '/api/companion/pair': {
+        const s = sid(body.session_id);
+        if (!s) return send(res, 400, { error: 'session_id is required' });
+        modeOf(s, body.mode);
+        return send(res, 200, { ...companion.pair(s), ws_path: '/api/companion/ws' });
+      }
+      case '/api/companion/cmd': {
+        // Test hook only (COMPANION_DEBUG=1): run one browser command, e.g. to prove the extension refuses to pay.
+        if (process.env.COMPANION_DEBUG !== '1') return send(res, 404, { error: 'not found' });
+        const s = sid(body.session_id);
+        const r = s && companion.remote(s);
+        if (!r) return send(res, 409, { error: 'no browser paired for this session' });
+        try { return send(res, 200, { ok: true, data: await r.cmd(String(body.name || ''), body.args || {}) }); } catch (err) {
+          return send(res, 200, { ok: false, error: err.message, refused: Boolean(err.refused) });
+        }
+      }
+      case '/api/companion/resume': {
+        const s = sid(body.session_id);
+        if (!s) return send(res, 400, { error: 'session_id is required' });
+        return send(res, 200, { ok: companion.resume(s, 'button') });
+      }
+      case '/api/companion/disconnect': {
+        const s = sid(body.session_id);
+        if (!s) return send(res, 400, { error: 'session_id is required' });
+        return send(res, 200, companion.unpair(s));
+      }
       case '/api/live/shops': {
         const s = sid(body.session_id);
         if (!s) return send(res, 400, { error: 'session_id is required' });
@@ -390,6 +439,29 @@ async function main() {
       console.error(`[agent] ${req.method} ${url.pathname} failed: ${err.message}`);
       return send(res, err.status || 500, { error: err.message || 'internal error' });
     }
+  });
+
+  // Companion WebSocket. Web pages may not connect (their Origin is http/https); the extension's origin is chrome-extension://.
+  const failedHellos = new Map(); // client address → { n, since }
+  server.on('upgrade', (req, socket) => {
+    let pathname = '';
+    try { pathname = new URL(req.url, 'http://localhost').pathname; } catch { /* ignore */ }
+    if (pathname !== '/api/companion/ws') { socket.destroy(); return; }
+    const origin = String(req.headers.origin || '');
+    if (/^https?:/i.test(origin)) { socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); return; }
+    const addr = String(req.headers['cf-connecting-ip'] || req.socket.remoteAddress || '');
+    const f = failedHellos.get(addr);
+    if (f && Date.now() - f.since < 10 * 60 * 1000 && f.n >= 20) { socket.end('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); return; }
+    const conn = ws.accept(req, socket);
+    if (!conn) return;
+    conn.on('close', ({ code }) => {
+      if (code !== 4003) return;
+      const cur = failedHellos.get(addr);
+      if (!cur || Date.now() - cur.since > 10 * 60 * 1000) failedHellos.set(addr, { n: 1, since: Date.now() });
+      else cur.n += 1;
+      if (failedHellos.size > 5000) failedHellos.delete(failedHellos.keys().next().value);
+    });
+    companion.attach(conn, { remoteAddress: addr });
   });
 
   const port = Number.parseInt(process.env.AGENT_PORT || '', 10) || 3000;

@@ -107,6 +107,22 @@ Errors: HTTP 4xx/5xx with `{error}`.
 | `audit` | `{event: AuditEvent}` |
 | `error` | `{message}` |
 
+### Shopz Companion (the user's own browser, `apps/companion`)
+- `POST /api/companion/pair {session_id, mode}` → `{code, expires_at, ttl_s}` – 6 characters, no 0/O/1/I/L, valid 10 min, one use; a new code replaces the session's unused one
+- `GET /api/companion/status?session=S` → `{connected, browser, extension_version, since, tab_url, your_turn: {turn_id, kind, url, message}|null}`
+- `POST /api/companion/resume {session_id}` → `{ok, resumed}` – panel "I'm done"; a "done"/"continue" utterance does the same, past the session queue (`{resumed: true}`)
+- `POST /api/companion/disconnect {session_id}` → `{ok}`
+- `POST /api/companion/cmd {session_id, name, args}` – test hook, only with `COMPANION_DEBUG=1`, else `404`
+- `GET /api/health` → `… companion: {ws_path: "/api/companion/ws", version: 1}`
+- WebSocket `/api/companion/ws` (RFC 6455, text frames, JSON). An http(s) `Origin` → `403`; 20 wrong codes per address in 10 min → `429`.
+  - extension → server: `{type:"hello", code|token, version, browser, allow_local}` → `{type:"paired", token}` (reconnect token, 12 h, one use) or `{type:"pair_failed"}` + close `4003`
+  - server → extension: `{type:"cmd", id, name, args}` with `name` ∈ `fetch, navigate, read, snapshot, query, scroll, highlight, fill, click, add_to_cart, back, reload, screenshot, status` → `{type:"result", id, ok, data|error, refused?}`
+  - server → extension: `{type:"your_turn", turn_id, kind: "login"|"captcha"|"2fa"|"payment", message}`, `{type:"turn_done", turn_id}`, `{type:"ping"}`
+  - extension → server: `{type:"event", name:"page"|"gate_cleared"|"turn_button"|"tab_closed", url?, title?, turn_id?}`
+  - `read` → `{url, title, text, jsonld:[string], meta:{}, bytes, html_sha256, gate:{kind, reason}}`; refused clicks/fills/URLs come back `ok:false, refused:true` (rules in `apps/companion/gate.js`)
+- SSE: `companion` (status), `companion.action` `{id, name, summary, url, state:"start"|"done"|"failed"|"refused", error?}`, `companion.page` `{url, title}`, `companion.your_turn` `{turn_id, kind, url, message, wait}`, `companion.turn_done` `{turn_id, kind, resumed_by: "voice"|"button"|"tab_button"|"auto"|"order_page"|"timeout"|"tab_closed"|"disconnected"|"replaced", ok}`
+- Audit: `companion_connected`, `companion_disconnected`, `browser_action`, `browser_action_refused`, `human_handoff`, `human_resumed`, `cart_checked`; live `handoff` carries `in_your_browser: true` when the checkout is open in the user's tab
+
 ### Machines (Firedrill, tests)
 - `POST /api/session/text {session_id?, text}` → `{session_id, replies:[string], state, events:[AuditEvent]}` – synchronous; narration auto-advances without waiting for speech.
 - `POST /api/chat {message, session_id?}` → `{session_id, reply}` (same, joined text)

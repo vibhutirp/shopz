@@ -938,3 +938,30 @@ export function renderMessage(ctx, { title, message, status = 404 }) {
 </div>`;
   return layout(ctx, { title: `${status} – ${title}`, body });
 }
+
+/** Fictional sign-in page (no real accounts): lets the Shopz Companion hand-off ("Your turn: please sign in") be tried on the demo stores. */
+export function renderLogin(ctx, { next = '/account', error = null } = {}) {
+  const body = `<div class="card" style="max-width:420px;margin:24px auto">
+<h1 class="page-title">Sign in to ${esc(ctx.name)}</h1>
+<p class="muted">Demo store: any email and password work. Nothing is stored except a demo cookie.</p>
+${error ? `<p class="muted" role="alert">${esc(error)}</p>` : ''}
+<form method="post" action="/account/login" class="form" data-testid="login-form">
+<input type="hidden" name="next" value="${esc(next)}">
+<label class="field c6">Email <input type="email" name="email" autocomplete="username" required></label>
+<label class="field c6">Password <input type="password" name="password" autocomplete="current-password" required></label>
+<button type="submit" class="btn btn-primary btn-block" data-testid="sign-in">Sign in</button>
+</form>
+</div>`;
+  return layout(ctx, { title: 'Sign in', body });
+}
+
+export function renderAccount(ctx, { email }) {
+  const body = `<div class="card" data-section="account" data-signed-in="true" style="max-width:560px;margin:24px auto">
+<h1 class="page-title">Your ${esc(ctx.name)} account</h1>
+<p>Signed in as <strong>${esc(email)}</strong> (demo account).</p>
+<p class="muted">Orders placed in this demo reset when the store resets.</p>
+<a class="btn" href="/">Keep shopping</a>
+</div>`;
+  return layout(ctx, { title: 'Your account', body });
+}
+

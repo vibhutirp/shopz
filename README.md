@@ -102,6 +102,40 @@ Switch the header to **Live web** (or open `/?mode=live`). Shopz then searches r
 - Polite fetching: an honest user agent, robots.txt respected, one request per store per step, a cool-down after HTTP 429, 12 s per page. Stores behind a captcha are skipped, not worked around. Only public https hosts are fetched (private addresses and redirects into them are refused).
 - The allowed-stores list is visible and editable in the drawer. A new store is probed before it is accepted.
 
+## Shopz Companion (your own browser)
+
+Shopz can work in **your own Chrome** instead of from the server. The Companion extension gives the agent hands in one tab of its own, so stores see your connection and your sign-ins. Planning, policy, audit and voice stay on the Shopz server.
+
+**Install (Chrome 116+):**
+
+1. `chrome://extensions` → switch on **Developer mode** → **Load unpacked** → pick the `apps/companion` folder.
+2. In the Shopz panel click **Connect browser**. It shows the server address and a 6-character code (valid for 10 minutes, usable once).
+3. Click the Shopz Companion icon, enter the address and the code, then **Connect**. The panel button turns green ("Your browser").
+
+**What it does:** search, read pages (text + schema.org JSON-LD), scroll, click, fill ordinary fields, add to the store cart and take screenshots. It does all of this only in the Shopz tab (a tab group called "Shopz"), and it never reads your other tabs. Every action shows in the tab ("Shopz · opened …"), in the panel ("In your browser") and in the audit chain (`browser_action`, `browser_action_refused`).
+
+**Your turn:** at a sign-in, a captcha, a verification code or the payment step, Shopz stops and hands over. The tab shows a "Your turn" banner and the panel a "Your turn" card. Once you're through, Shopz continues by itself when the check is gone. You can also say "done" or tap **I'm done**. Hand-offs are logged as `human_handoff` and `human_resumed`.
+
+**Buying:** Shopz buys only within your policy or after an explicit "confirm purchase". In live mode it puts the item into the store's own cart, checks the cart price, opens the checkout and hands over. You pay. In the demo stores it goes up to the payment page, and you click **Place order**.
+
+**Hard limits (built into `apps/companion/gate.js`, enforced in the extension and tested on the server):**
+
+- Shopz never clicks pay, place order or buy now.
+- It never types passwords, card numbers, security codes or one-time codes.
+- It doesn't solve captchas.
+- It doesn't change your browser's fingerprint and doesn't rotate proxies.
+- It doesn't open browser-internal pages, files or local-network addresses (unless Shopz itself runs locally).
+
+Web pages can't connect to the Companion socket: the server refuses an http(s) Origin. After 20 wrong codes, the address that sent them is locked out for 10 minutes.
+
+**Without the extension** everything works as before, from the server. If the browser disconnects, Shopz falls back to the server automatically. A demo checkout that has reached the payment page never falls back, so it can never place a second order.
+
+**Test:** `npm test` covers the rules, the socket, pairing and hand-offs. The full browser run loads the real extension into Playwright Chromium and drives the demo stores, a sign-in hand-off at 390 px and one real Shopify store. Start the agent with `COMPANION_DEBUG=1` for this run (it enables a test-only command route that is off otherwise):
+
+```bash
+AGENT=http://localhost:3000 RUNHUB=http://localhost:4001 LIVE_STORE=www.allbirds.com OUT=/tmp/companion-e2e node scripts/companion-e2e.mjs
+```
+
 ## Trust design
 
 - **Grounded answers.** Every answer comes from a page snapshot (section text + data attributes, sha256-hashed). With an LLM, the reply has to quote a span that is literally in the snapshot. If it doesn't, the answer becomes "the page doesn't say".
@@ -126,6 +160,7 @@ npm run scenarios        # adversarial scenario suite against a running agent
 ```
 apps/agent/        agent server (HTTP + SSE), orchestrator, policy, audit, memory, search, ranking
 apps/browser/      browser controller (Python: Nova Act or Playwright)
+apps/companion/    Shopz Companion – Chrome extension (MV3) for the user's own browser
 apps/merchants/    the two fictional stores (plain Node, no dependencies)
 apps/panel/        the control panel (static HTML/JS/CSS)
 packages/contracts shared constants and helpers

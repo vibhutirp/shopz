@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shopz Companion</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header><img src="icons/32.png" alt="" width="24" height="24"><div><h1>Shopz Companion</h1><p id="sub">Let Shopz use this browser</p></div></header>
+  <section id="pairBox">
+    <label>Shopz address <input id="server" type="url" placeholder="https://your-shopz-panel" autocomplete="off" spellcheck="false"></label>
+    <label>Code from the panel <input id="code" type="text" placeholder="e.g. K7QM4Z" maxlength="8" autocomplete="off" spellcheck="false" autocapitalize="characters"></label>
+    <button id="connect" type="button">Connect</button>
+  </section>
+  <section id="onBox" hidden>
+    <div class="status"><span class="dot"></span><span id="statusText">Connected</span></div>
+    <div id="turn" class="turn" hidden></div>
+    <ol id="log"></ol>
+    <button id="disconnect" type="button" class="ghost">Disconnect</button>
+  </section>
+  <p id="err" class="err" role="alert" hidden></p>
+  <footer>Shopz works in one tab it opens (group “Shopz”). It never types passwords or card numbers, never pays and never solves captchas – it hands those to you.</footer>
+  <script src="popup.js"></script>
+</body>
+</html>

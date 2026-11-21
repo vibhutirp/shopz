@@ -9,6 +9,7 @@ import { createShopifyClient, normalizeHost, shopLabel, pickVariant } from './sh
 import { parseLiveRequest, looksLikeRequest, refineWithLocalModel, LIVE_CATEGORIES } from './request.js';
 import { DEFAULT_LIVE_SHOPS } from './shops.js';
 import { productHits } from './websearch.js';
+import { createCompanionClient } from '../companion/live-client.js';
 
 const USER_ID = 'u_demo';
 const ORD = ['First', 'Second', 'Third', 'Fourth', 'Fifth'];
@@ -71,7 +72,7 @@ export function pickTop(cands, n = 3) {
 
 export function createLiveOrchestrator({
   audit, emit = () => {}, browser = null, evaluate, client = createShopifyClient(), shops = DEFAULT_LIVE_SHOPS,
-  llm = null, refine = refineWithLocalModel, webSearch = null, now = () => Date.now(),
+  llm = null, refine = refineWithLocalModel, webSearch = null, now = () => Date.now(), companion = null,
 } = {}) {
   const sessions = new Map();
   let browserLock = Promise.resolve();
@@ -84,6 +85,15 @@ export function createLiveOrchestrator({
     };
   }
   const getSession = (id) => { const k = String(id || 'default'); let s = sessions.get(k); if (!s) { s = newSession(k); sessions.set(k, s); } return s; };
+  /** The user's own browser when Shopz Companion is paired for this session, else the server (fallback, unchanged). */
+  function hands(s) {
+    const r = companion ? companion.remote(s.id) : null;
+    if (!r) { s.cc = null; return null; }
+    const since = companion.status(s.id).since;
+    if (!s.cc || s.cc.since !== since) s.cc = { since, remote: r, client: createCompanionClient(r, { now, ...(companion.clientOptions || {}) }) };
+    return s.cc;
+  }
+  const cli = (s) => hands(s)?.client || client;
   const enqueue = (s, fn) => { const run = s.chain.then(() => fn()); s.chain = run.then(() => {}, () => {}); return run; };
 
   async function log(s, type, actor, summary, data = {}, refs = {}) {
@@ -107,7 +117,9 @@ export function createLiveOrchestrator({
   const shopName = (s, host) => s.shops.find((x) => x.host === host)?.name || shopLabel(host);
 
   /** The visible browser (controller on the presenter's laptop) follows along; on a server without one this is a no-op. */
-  function showInBrowser(url) {
+  function showInBrowser(url, s = null) {
+    const h = s ? hands(s) : null;
+    if (h) { h.remote.cmd('navigate', { url }).catch(() => {}); return; }
     if (!browser || browser.mode !== 'controller' || typeof browser.open !== 'function') return;
     const run = browserLock.then(() => browser.open(url));
     browserLock = run.then(() => {}, () => {});
@@ -150,6 +162,8 @@ export function createLiveOrchestrator({
       s.pending = null;
       setState(s, 'AWAIT_CHOICE');
     }
+    const open = parseOpenCommand(text);
+    if (open) return browse(s, open);
     const hasOptions = s.options.length > 0;
     const state = hasOptions ? 'AWAIT_CHOICE' : 'IDLE';
     const intents = route(text, { state, optionCount: s.options.length, options: s.options });
@@ -244,11 +258,11 @@ export function createLiveOrchestrator({
         let list = [];
         let error = null;
         try {
-          let r = await client.search(shop.host, req.query, { timeoutMs: SEARCH_TIMEOUT_MS });
+          let r = await cli(s).search(shop.host, req.query, { timeoutMs: SEARCH_TIMEOUT_MS });
           list = r.products;
           const core = req.category ? LIVE_CATEGORIES[req.category].core : null;
           if (!list.some((p) => scoreProduct(p, req) > 0) && core && core !== req.query) {
-            r = await client.search(shop.host, core, { timeoutMs: SEARCH_TIMEOUT_MS });
+            r = await cli(s).search(shop.host, core, { timeoutMs: SEARCH_TIMEOUT_MS });
             list = r.products;
           }
         } catch (err) { error = clip(err.message, 120); }
@@ -264,7 +278,7 @@ export function createLiveOrchestrator({
     for (const hit of await webPart) {
       if (cands.some((c) => c.host === hit.host && c.handle === hit.handle)) continue;
       try {
-        const p = await client.product(hit.host, hit.handle, { timeoutMs: SEARCH_TIMEOUT_MS });
+        const p = await cli(s).product(hit.host, hit.handle, { timeoutMs: SEARCH_TIMEOUT_MS });
         const shop = targets.find((x) => x.host === hit.host);
         const c = { handle: p.handle, title: p.title, vendor: p.vendor, type: p.type, tags: [], price: p.price, available: p.available, image: p.image,
           url: `https://${hit.host}/products/${encodeURIComponent(p.handle)}`, description: p.description, host: hit.host, store_name: shop.name, sku: `${hit.host}/${p.handle}`, via: 'web_search' };
@@ -296,10 +310,10 @@ export function createLiveOrchestrator({
     if (gen !== s.gen) return;
     emit(s.id, 'options', { options: s.options, live: true, partial: false, update: true });
     s.current = 0;
-    showInBrowser(s.options[0].url);
+    showInBrowser(s.options[0].url, s);
     const stores = [...new Set(s.options.map((o) => o.store_name))];
     setState(s, 'NARRATE', 0);
-    say(s, `I searched ${targets.length} stores live and found ${cands.length} matching product${cands.length === 1 ? '' : 's'}. Here are the top ${s.options.length}, from ${joinAnd(stores)}.`);
+    say(s, `I searched ${targets.length === 1 ? `one store` : `${targets.length} stores`} live${hands(s) ? ' from your browser' : ''} and found ${cands.length} matching product${cands.length === 1 ? '' : 's'}. Here are the top ${s.options.length}, from ${joinAnd(stores)}.`);
     s.options.forEach((o, i) => say(s, optionLine(o, i), i));
     say(s, 'Tap a card, ask me anything about it, or say buy the first one.');
     setState(s, 'AWAIT_CHOICE', 0);
@@ -333,7 +347,7 @@ export function createLiveOrchestrator({
     }, { sku: o.sku, option_id: o.option_id });
     let page = null;
     try {
-      page = await client.page(o.store, o.handle, { timeoutMs: PAGE_TIMEOUT_MS });
+      page = await cli(s).page(o.store, o.handle, { timeoutMs: PAGE_TIMEOUT_MS });
     } catch (err) {
       await log(s, 'fallback_used', 'system', `Could not read the page at ${shopLabel(o.store)} (${clip(err.message, 80)}) – using the store's search data`, { sku: o.sku, url: o.url, detail: err.message });
     }
@@ -400,9 +414,10 @@ export function createLiveOrchestrator({
     if (i === s.current && reason === 'next' && i === s.options.length - 1) { say(s, 'That was the last one. Say go back, or buy this one.'); return; }
     s.current = i;
     setState(s, 'AWAIT_CHOICE', i);
-    showInBrowser(o.url);
-    if (!s.pages.has(o.sku)) await readPage(s, o);
-    else await log(s, 'page_opened', 'agent', `Went back to ${spokenTitle(o.title)}`, { url: o.url, sku: o.sku, option_index: i, reason, live: true }, { sku: o.sku });
+    if (!s.pages.has(o.sku)) { if (!hands(s)) showInBrowser(o.url); await readPage(s, o); } else {
+      showInBrowser(o.url, s);
+      await log(s, 'page_opened', 'agent', `Went back to ${spokenTitle(o.title)}`, { url: o.url, sku: o.sku, option_index: i, reason, live: true }, { sku: o.sku });
+    }
     say(s, optionLine(o, i), i);
   }
 
@@ -461,7 +476,7 @@ export function createLiveOrchestrator({
     // Fresh price + stock straight from the store (never from the cached search result).
     await log(s, 'page_reload', 'agent', `Reloaded ${spokenTitle(o.title)} to re-check price and stock`, { url: o.url, sku: o.sku, live: true }, { sku: o.sku });
     let prod = null;
-    try { prod = await client.product(o.store, o.handle, { timeoutMs: PAGE_TIMEOUT_MS }); } catch (err) {
+    try { prod = await cli(s).product(o.store, o.handle, { timeoutMs: PAGE_TIMEOUT_MS }); } catch (err) {
       await log(s, 'error', 'system', `Could not re-check ${shopLabel(o.store)}: ${clip(err.message, 100)}`, { stage: 'verify', message: err.message, sku: o.sku });
       say(s, `I couldn't re-check the price at ${o.store_name} right now, so I won't hand this one off. Please try again in a minute.`, i);
       setState(s, 'AWAIT_CHOICE', i);
@@ -546,6 +561,11 @@ export function createLiveOrchestrator({
     const o = p.opt;
     let url = o.url;
     if (p.variant?.id) { const u = new URL(o.url); u.searchParams.set('variant', String(p.variant.id)); url = u.href; }
+    const h = hands(s);
+    if (h) {
+      const done = await cartInBrowser(s, h, p, url, approval);
+      if (done) return;
+    }
     const ev = await log(s, 'handoff', 'agent', `Ready to buy: handed off to ${shopLabel(o.store)} – Shopz does not pay`, {
       sku: o.sku, title: o.title, store: o.store, store_name: o.store_name, url, price: p.price, currency: p.currency,
       variant_id: p.variant?.id ?? null, variant: p.variant?.title ?? null, approval, paid_by_shopz: false, logged_in: false, live: true,
@@ -555,6 +575,76 @@ export function createLiveOrchestrator({
     });
     setState(s, 'DONE', s.current);
     say(s, `Ready to buy. ${spokenTitle(o.title)} is ${spokenMoney(p.price, p.currency)} and in stock. Shopz never pays for you, so tap Open in store to check out at ${o.store_name}.`, s.current);
+  }
+
+  // ---------------------------------------------------------------- the user's browser (Shopz Companion)
+  /**
+   * After the policy said yes (or the user confirmed): put the item into the store cart in the user's own browser,
+   * check the cart line, open the checkout, and hand the tab over. Paying is always the human's tap.
+   * Returns false when the browser could not do it – the normal "Open in store" hand-off follows.
+   */
+  async function cartInBrowser(s, h, p, url, approval) {
+    const o = p.opt;
+    try {
+      await h.remote.cmd('navigate', { url });
+      const add = await h.remote.cmd('add_to_cart', { variant_id: p.variant?.id ?? null, qty: 1 });
+      const line = (add.cart?.items || []).find((x) => String(x.variant_id) === String(p.variant?.id ?? '') || x.handle === o.handle) || null;
+      const linePrice = line && Number.isFinite(Number(line.price)) ? Number(line.price) : null;
+      await log(s, 'cart_checked', 'agent', line ? `The store cart has ${spokenTitle(o.title)} at ${liveMoney(linePrice ?? p.price, p.currency)}` : `Added ${spokenTitle(o.title)} – the store did not show the cart line`, {
+        sku: o.sku, store: o.store, method: add.method || null, line, cart_items: add.cart?.item_count ?? null, price_checked: p.price, line_price: linePrice, live: true,
+      }, { sku: o.sku });
+      if (linePrice !== null && Math.abs(linePrice - p.price) >= 0.005) {
+        emit(s.id, 'price_diff', { sku: o.sku, title: o.title, before: p.price, after: linePrice, before_ts: p.at, after_ts: new Date(now()).toISOString(), currency: p.currency });
+        say(s, `Careful: the store cart shows ${spokenMoney(linePrice, p.currency)}, not ${spokenMoney(p.price, p.currency)}. Check the cart before you pay.`, s.current);
+      }
+      const checkout = `https://${o.store}/checkout`;
+      const nav = await h.remote.cmd('navigate', { url: checkout });
+      const read = await h.remote.cmd('read', {}).catch(() => ({ gate: null, url: nav.url }));
+      const gate = read.gate?.kind || 'payment';
+      const ev = await log(s, 'handoff', 'agent', `In your browser: ${spokenTitle(o.title)} is in the ${shopLabel(o.store)} cart, checkout is open – you pay, Shopz does not`, {
+        sku: o.sku, title: o.title, store: o.store, store_name: o.store_name, url: read.url || nav.url || checkout, product_url: url, price: p.price, currency: p.currency,
+        variant_id: p.variant?.id ?? null, variant: p.variant?.title ?? null, approval, paid_by_shopz: false, logged_in: false, in_your_browser: true, checkout_gate: gate, live: true,
+      }, { sku: o.sku });
+      emit(s.id, 'handoff', {
+        handoff: { title: o.title, store_name: o.store_name, store: o.store, url: read.url || checkout, price: p.price, currency: p.currency, image_url: o.image_url, variant: p.variant?.title ?? null, approval, event_id: ev?.event_id ?? null, in_your_browser: true },
+      });
+      setState(s, 'DONE', s.current);
+      await h.remote.yourTurn({ kind: gate === 'login' || gate === 'captcha' || gate === '2fa' ? gate : 'payment', url: read.url || checkout, reason: 'checkout', wait: false });
+      say(s, gate === 'login'
+        ? `It's in your ${o.store_name} cart. The checkout wants you to sign in first – your turn in the Shopz tab. Shopz never types passwords and never pays.`
+        : `It's in your ${o.store_name} cart at ${spokenMoney(linePrice ?? p.price, p.currency)}, and the checkout is open in the Shopz tab. Your turn: check the details and pay there. Shopz never clicks pay.`, s.current);
+      return true;
+    } catch (err) {
+      await log(s, 'fallback_used', 'system', `Your browser could not prepare the cart (${clip(err.message, 90)}) – handing off with a link instead`, { stage: 'cart_in_browser', detail: err.message, sku: o.sku });
+      return false;
+    }
+  }
+
+  /** "open allbirds.com/account" – read any page in the user's browser; a sign-in or check there is the human's turn. */
+  async function browse(s, target) {
+    const h = hands(s);
+    if (!h) {
+      say(s, 'Opening any page needs Shopz Companion in your own browser. Tap Connect your browser at the top, then ask again.');
+      return;
+    }
+    const reason = companion.gate.refuseUrl(target.url, { allowLocal: h.remote.allowLocal });
+    if (reason) { say(s, `I won't open that: ${reason}.`); return; }
+    setState(s, 'SEARCH', null);
+    let r;
+    try { r = await h.client.readTab(target.url); } catch (err) {
+      await log(s, 'error', 'system', `Could not open ${clip(target.url, 80)}: ${clip(err.message, 100)}`, { stage: 'browse', url: target.url, message: err.message });
+      say(s, err.blocked ? `${shopLabel(new URL(target.url).host)} still needs you, so I stopped there.` : `I couldn't open that page in your browser (${clip(err.message, 80)}).`);
+      setState(s, s.options.length ? 'AWAIT_CHOICE' : 'IDLE');
+      return;
+    }
+    const text = String(r.text || '');
+    const sha = sha256Hex(text);
+    await log(s, 'page_read', 'agent', `Read ${shopLabel(hostOf(r.url || target.url))}${pathOf(r.url || target.url)} in your browser`, { url: r.url || target.url, title: clip(r.title, 120), snapshot_sha256: sha, sha256: sha, bytes: text.length, text: clip(text, 600), live: true, via: 'companion' });
+    const inj = detectInjection(text);
+    if (inj) await log(s, 'injection_ignored', 'agent', 'Ignored instructions found in page content', { quote: inj, url: r.url || target.url, snapshot_sha256: sha });
+    const head = text.split('\n').map((l) => l.trim()).filter((l) => l.length > 2 && l.length < 160 && !detectInjection(l)).slice(0, 3);
+    say(s, `This is ${clip(r.title || shopLabel(hostOf(r.url || target.url)), 90)}${head.length ? `. It starts with: ${head.join('. ')}` : ''}. Ask me about it, or tell me what to find.`);
+    setState(s, s.options.length ? 'AWAIT_CHOICE' : 'IDLE');
   }
 
   // ---------------------------------------------------------------- stores
@@ -572,7 +662,7 @@ export function createLiveOrchestrator({
       if (s.shops.length >= MAX_SHOPS) throw Object.assign(new Error(`At most ${MAX_SHOPS} stores`), { status: 400 });
       if (!s.shops.some((y) => y.host === host)) {
         // Only stores that answer the public storefront search can be used (no login, no bot wall).
-        try { await client.search(host, 'a', { limit: 1, timeoutMs: 6000 }); } catch (err) {
+        try { await cli(s).search(host, 'a', { limit: 1, timeoutMs: 6000 }); } catch (err) {
           throw Object.assign(new Error(`${shopLabel(host)} can't be searched by Shopz (${clip(err.message, 60)})`), { status: 422 });
         }
         s.shops.push({ host, name: shopLabel(host), categories: [], enabled: true, added: true });
@@ -592,7 +682,7 @@ export function createLiveOrchestrator({
   const speechDone = async () => {};
   const has = (session_id) => sessions.has(String(session_id));
 
-  return { handle, session, reset, bargeIn, speaking, speechDone, listShops, updateShops, has, notice: LIVE_NOTICE };
+  return { handle, session, reset, bargeIn, speaking, speechDone, listShops, updateShops, has, notice: LIVE_NOTICE, viaBrowser: (id) => Boolean(hands(getSession(id))) };
 }
 
 /** Results that would match without the budget (to tell "nothing under $X" from "nothing at all"). */
@@ -604,4 +694,17 @@ function joinAnd(list) {
   const l = list.filter(Boolean);
   if (l.length <= 1) return l.join('');
   return `${l.slice(0, -1).join(', ')} and ${l[l.length - 1]}`;
+}
+
+const hostOf = (u) => { try { return new URL(u).host; } catch { return ''; } };
+const pathOf = (u) => { try { const p = new URL(u).pathname; return p === '/' ? '' : p.slice(0, 60); } catch { return ''; } };
+
+/** "open allbirds.com/account", "go to https://www.rei.com/" → { url } (https only); anything else → null. */
+export function parseOpenCommand(text) {
+  const m = String(text || '').trim().match(/^(?:please\s+)?(?:open|go to|visit|navigate to|take me to)\s+(?:the\s+(?:page|site|website)\s+)?<?((?:https?:\/\/)?(?:(?:[a-z0-9-]+\.)+[a-z]{2,}|localhost)(?::\d+)?(?:\/[^\s>]*?)?)>?\s*[.!]?$/i);
+  if (!m) return null;
+  let url = m[1];
+  // Bare "localhost:4001/…" is the local demo setup (http); everything else defaults to https.
+  if (!/^https?:\/\//i.test(url)) url = /^localhost\b/i.test(url) ? `http://${url}` : `https://${url}`;
+  try { const u = new URL(url); return { url: u.href }; } catch { return null; }
 }

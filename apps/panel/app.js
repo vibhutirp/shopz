@@ -1254,7 +1254,9 @@
           x.variant && x.variant !== 'Default Title' ? h('div', { class: 'handoff-sub' }, x.variant) : null)),
       h('div', { class: 'handoff-actions' },
         h('a', { class: 'btn btn-primary', href: x.url, target: '_blank', rel: 'noopener noreferrer', html: 'Open in store ' + icon('out') })),
-      h('div', { class: 'handoff-note' }, 'Shopz never pays and never logs in for you. Checkout, taxes and shipping happen in the store.')));
+      h('div', { class: 'handoff-note' }, x.in_your_browser
+        ? 'It is in your store cart and the checkout is open in the Shopz tab of your browser. Shopz never pays and never logs in for you.'
+        : 'Shopz never pays and never logs in for you. Checkout, taxes and shipping happen in the store.')));
     if (decision.policy && decision.policyEl) { decision.approval = decision.approval === 'granted' ? 'granted' : 'handoff'; renderPolicyCard(); }
     scrollTurns();
   }
@@ -2357,6 +2359,11 @@
       try { const c = await (await fetch('/api/config', { cache: 'no-store' })).json(); MODE = c.default_mode === 'live' ? 'live' : 'demo'; } catch { MODE = 'demo'; }
     }
     applyMode();
+    // Shopz Companion (companion.js): its event handlers join the stream; it gets the session and a few helpers.
+    if (window.ShopzCompanion) {
+      Object.assign(HANDLERS, window.ShopzCompanion.handlers);
+      window.ShopzCompanion.init({ session: SESSION, mode: () => MODE, post, toast, h, placeInThread, hideWelcome, scrollTurns });
+    }
     connect();
   }
   setStep('IDLE');

@@ -416,7 +416,27 @@ async function routePage(ctx, req, res, method, path, url) {
     return redirect(res, `/order/${order.order_id}`);
   }
 
+  // Fictional sign-in (any email/password), so the Companion's "Your turn: please sign in" can be tried locally.
+  const loginCookie = `${String(ctx.name).toLowerCase().replace(/[^a-z0-9]/g, '')}_demo_login`;
+  if (path === '/account/login' && method === 'POST') {
+    const body = await readBody(req);
+    const email = String(body.email || '').trim().slice(0, 120);
+    const next = typeof body.next === 'string' && body.next.startsWith('/') && !body.next.startsWith('//') ? body.next : '/account';
+    if (!email || !body.password) return html(res, 400, V.renderLogin(ctx, { next, error: 'Enter an email and a password.' }));
+    res.writeHead(303, { Location: next, 'Set-Cookie': `${loginCookie}=${encodeURIComponent(email)}; Path=/; HttpOnly; SameSite=Lax`, 'Cache-Control': 'no-store' });
+    return res.end();
+  }
+
   if (method !== 'GET') return html(res, 405, V.renderMessage(ctx, { title: 'Method not allowed', message: 'Use the links and buttons on the page.', status: 405 }));
+
+  if (path === '/account/login') return html(res, 200, V.renderLogin(ctx, { next: sp.get('next') || '/account' }));
+  if (path === '/account') {
+    const m2 = String(req.headers.cookie || '').match(new RegExp(`(?:^|;\\s*)${loginCookie}=([^;]+)`));
+    if (!m2) return redirect(res, '/account/login?next=%2Faccount');
+    let email = m2[1];
+    try { email = decodeURIComponent(email); } catch { /* keep raw */ }
+    return html(res, 200, V.renderAccount(ctx, { email }));
+  }
 
   if (path === '/') return html(res, 200, V.renderHome(ctx, ctx.state.products));
 
