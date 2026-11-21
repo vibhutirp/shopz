@@ -2,67 +2,90 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light">
-  <title>Shopz – control panel</title>
+  <title>Shopz</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <div id="app">
     <header class="hdr">
-      <div class="brand" aria-label="Shopz">Shop<span>z</span></div>
-      <div class="badge" title="All stores, products and ratings are fictional demo data. Preferences are pre-seeded.">Demo data: fictional stores, products and ratings · preferences pre-seeded</div>
+      <div class="hdr-left">
+        <div class="brand" aria-label="Shopz"><span class="brand-mark" aria-hidden="true"></span>Shopz</div>
+        <div class="badge" title="All stores, products and ratings are fictional demo data. Preferences are pre-seeded.">Demo data: fictional stores, products and ratings · preferences pre-seeded</div>
+      </div>
+      <div id="progress" class="progress" aria-label="Current step" hidden>
+        <span id="progressDots" class="progress-dots" aria-hidden="true"></span>
+        <span id="progressText" class="progress-text"></span>
+      </div>
       <div class="hdr-right">
-        <span id="mutedTag" class="muted-tag" hidden>Muted</span>
-        <span id="conn" class="conn" title="Connecting…"></span>
         <div id="micPill" class="pill pill-idle" role="status">
           <span class="pill-dot"></span>
           <span class="eq" aria-hidden="true"><i></i><i></i><i></i></span>
           <span id="micPillText">Idle</span>
         </div>
+        <button id="muteBtn" class="icon-btn" type="button" title="Voice on (M)" aria-pressed="false" aria-label="Mute the agent voice"></button>
+        <button id="actBtn" class="act-btn" type="button" aria-controls="drawer" aria-expanded="false" title="Activity, memory and audit trail">
+          <span id="conn" class="conn" title="Connecting…"></span>
+          <span class="act-btn-label">Activity</span>
+          <span id="actBtnCount" class="act-btn-count">0</span>
+          <span id="actBtnChain" class="act-btn-chain" aria-hidden="true"></span>
+        </button>
+        <span id="mutedTag" hidden>Muted</span>
       </div>
     </header>
 
-    <section class="card transcript" aria-label="Conversation">
-      <div id="turns" class="turns" aria-live="polite">
-        <div id="turnsEmpty" class="turns-empty">Hold <kbd>Space</kbd> and tell Shopz what you need.</div>
+    <main class="main">
+      <div id="scroller" class="scroller">
+        <div id="thread" class="thread" aria-live="polite">
+          <div id="welcome" class="welcome">
+            <div class="welcome-mark" aria-hidden="true"></div>
+            <h1>What can I find for you?</h1>
+            <p>Talk or type. Shopz searches your approved stores, reads every page out loud and shows each step it takes.</p>
+            <div id="welcomeChips" class="quick welcome-chips"></div>
+            <div id="welcomeProfile" class="welcome-profile" hidden></div>
+          </div>
+        </div>
       </div>
-      <div class="composer">
-        <button id="micBtn" class="mic-btn" type="button" tabindex="-1" aria-label="Hold to talk">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="8.5" y="2.5" width="7" height="12" rx="3.5"></rect>
-            <path d="M5 11a7 7 0 0 0 14 0M12 18v3.5"></path>
-          </svg>
-        </button>
-        <div id="micHint" class="composer-hint">Hold <kbd>Space</kbd> or the mic to talk</div>
-        <form id="textForm" class="text-form" autocomplete="off">
-          <input id="textInput" type="text" placeholder="…or type and press Enter" aria-label="Type a message" spellcheck="false">
+
+      <div class="dock">
+        <div id="quick" class="quick" aria-label="Suggested replies" hidden></div>
+        <form id="textForm" class="composer" autocomplete="off">
+          <button id="micBtn" class="mic-btn" type="button" tabindex="-1" aria-label="Hold to talk">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="8.5" y="2.5" width="7" height="12" rx="3.5"></rect>
+              <path d="M5 11a7 7 0 0 0 14 0M12 18v3.5"></path>
+            </svg>
+          </button>
+          <input id="textInput" type="text" placeholder="Message Shopz" aria-label="Type a message" spellcheck="false" enterkeyhint="send">
+          <button id="sendBtn" class="send-btn" type="submit" aria-label="Send" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></svg>
+          </button>
         </form>
+        <div id="micHint" class="composer-hint">Hold <kbd>Space</kbd> or the mic to talk · <kbd>?</kbd> keys</div>
       </div>
-    </section>
+    </main>
 
-    <nav id="steps" class="steps" aria-label="Current step"></nav>
-
-    <section id="chips" class="chips" aria-label="Memory and constraints" hidden></section>
-
-    <section id="options" class="card options" aria-label="Options" hidden>
-      <div class="sec-head"><span>Options</span><span id="optionsMeta" class="sec-meta"></span></div>
-      <div id="optionRows"></div>
-    </section>
-
-    <section id="decision" class="decision" hidden>
-      <div id="policyCard" class="card policy" hidden></div>
-      <div id="priceCard" class="card price" hidden></div>
-      <div id="orderCard" class="card order" hidden></div>
-    </section>
-
-    <section class="card timeline" aria-label="Audit timeline">
-      <div class="sec-head"><span>Audit trail</span><span class="sec-meta">newest first · click a row for details</span></div>
-      <div id="tl" class="tl-list">
-        <div id="tlEmpty" class="tl-empty">Every page read, price seen, rule applied and word said lands here.</div>
+    <div id="scrim" class="scrim" hidden></div>
+    <aside id="drawer" class="drawer" aria-label="Activity" aria-hidden="true">
+      <div class="drawer-head">
+        <div>
+          <div class="drawer-title">Activity</div>
+          <div id="drawerSub" class="drawer-sub">Every page read, price seen and rule applied</div>
+        </div>
+        <button id="drawerClose" class="icon-btn" type="button" aria-label="Close activity"></button>
+      </div>
+      <div class="drawer-body">
+        <section id="chips" class="ctx" aria-label="Memory and constraints" hidden></section>
+        <section class="ctx-sec">
+          <div class="ctx-label">Audit trail <span class="ctx-meta">newest first · tap a row for the raw event</span></div>
+          <div id="tl" class="tl-list">
+            <div id="tlEmpty" class="tl-empty">Every page read, price seen, rule applied and word said lands here – hash-chained.</div>
+          </div>
+        </section>
       </div>
       <footer id="chain" class="chain unk"><span class="chain-main">Hash chain: checking…</span></footer>
-    </section>
+    </aside>
   </div>
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
@@ -73,9 +96,10 @@
       <dl>
         <dt><kbd>Space</kbd> hold</dt><dd>Push to talk (stops the agent if it is speaking)</dd>
         <dt><kbd>M</kbd></dt><dd>Mute / unmute the agent voice (flow continues)</dd>
+        <dt><kbd>A</kbd></dt><dd>Open / close the activity drawer</dd>
         <dt><kbd>Shift</kbd>+<kbd>P</kbd></dt><dd>Simulated price change on the first option (+$10)</dd>
         <dt><kbd>Shift</kbd>+<kbd>R</kbd></dt><dd>Reset session and stores, then reload</dd>
-        <dt><kbd>Esc</kbd></dt><dd>Close this help / leave the text box</dd>
+        <dt><kbd>Esc</kbd></dt><dd>Close this help / the drawer / leave the text box</dd>
         <dt><kbd>?</kbd></dt><dd>Toggle this help</dd>
       </dl>
     </div>

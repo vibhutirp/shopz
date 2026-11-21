@@ -200,3 +200,23 @@ test('chat endpoint answers for generic HTTP agent testers', async () => {
   assert.ok(r.session_id);
   assert.match(r.reply, /What are you shopping for/);
 });
+
+test('panel card art: every option sku has an inline svg, unknown sku is 404', async () => {
+  const S = 'e2e_art';
+  await post('/api/admin/reset', { session_id: S });
+  await say(S, 'I need running shoes for a half marathon in three weeks.');
+  await say(S, 'By next Friday.');
+  const skus = ['RH-STW-GL5-W', 'DC-KST-TP2-W', 'RH-OND-CP-W', 'DC-MRW-HB-12'];
+  for (const sku of skus) {
+    const r = await fetch(`${AGENT}/api/art/${encodeURIComponent(sku)}`);
+    assert.equal(r.status, 200, sku);
+    assert.match(r.headers.get('content-type') || '', /image\/svg\+xml/);
+    const svg = await r.text();
+    assert.match(svg, /^<svg [^>]*xmlns="http:\/\/www\.w3\.org\/2000\/svg"/);
+    assert.ok(svg.includes('(illustration)'), sku);
+  }
+  const top = await (await fetch(`${AGENT}/api/art/RH-STW-GL5-W?view=top`)).text();
+  assert.ok(top.includes('Top view'));
+  const bad = await fetch(`${AGENT}/api/art/NOPE-1?view=side`);
+  assert.equal(bad.status, 404);
+});

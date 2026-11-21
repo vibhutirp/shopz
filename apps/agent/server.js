@@ -184,6 +184,18 @@ async function main() {
     if (req.method === 'GET' && p === '/api/health') {
       return send(res, 200, { ok: true, store: store.kind, browser: browser.mode, llm: llmConfigured });
     }
+    if (req.method === 'GET' && p.startsWith('/api/art/')) {
+      // Product illustration for the panel cards: the same fictional inline SVG the demo stores render.
+      const sku = decodeURIComponent(p.slice('/api/art/'.length));
+      const [{ CATALOG }, { productArt }] = await Promise.all([import('../merchants/catalog.js'), import('../merchants/views.js')]);
+      const prod = CATALOG.find((x) => x.sku === sku);
+      if (!prod) return send(res, 404, { error: 'unknown sku' });
+      const views = prod.art.kind === 'coffee' ? ['front', 'back', 'beans', 'cup'] : ['side', 'medial', 'top', 'sole'];
+      const view = views.includes(q.get('view')) ? q.get('view') : views[0];
+      const svg = productArt(prod, view);
+      res.writeHead(200, { 'Content-Type': 'image/svg+xml; charset=utf-8', 'Content-Length': Buffer.byteLength(svg), 'Cache-Control': 'public, max-age=3600' });
+      return res.end(svg);
+    }
     if (req.method === 'GET' && p === '/api/poll') {
       const s = sid(q.get('session'));
       if (!s) return send(res, 400, { error: 'session is required' });

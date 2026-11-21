@@ -181,6 +181,9 @@
     box: '<path d="M2 4.75L8 1.75l6 3v6.5l-6 3-6-3z"/><path d="M2 4.75l6 3 6-3M8 7.75v6.5"/>',
     shield: '<path d="M8 1.5l5.25 2v4.25c0 3.25-2.25 5.75-5.25 6.75-3-1-5.25-3.5-5.25-6.75V3.5z"/>',
     cart: '<path d="M1.5 2h2l1.75 8h7.25l1.5-5.5H4.1"/><circle cx="6.25" cy="13" r="1"/><circle cx="12" cy="13" r="1"/>',
+    chev: '<path d="M6 3.5L10.5 8 6 12.5"/>',
+    speaker: '<path d="M2.5 6h2.5l3.5-3v10l-3.5-3H2.5z"/><path d="M11 5.5a3.5 3.5 0 0 1 0 5M12.75 3.5a6 6 0 0 1 0 9"/>',
+    speakerOff: '<path d="M2.5 6h2.5l3.5-3v10l-3.5-3H2.5z"/><path d="M11 6l3.5 4M14.5 6L11 10"/>',
   };
   const icon = (name) =>
     `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_PATHS[name] || ICON_PATHS.dot}</svg>`;
@@ -206,59 +209,96 @@
     return 'neutral';
   }
 
-  /* ------------------------------------------------------------------ transcript */
-  const MAX_TURNS = 6;
-  const turnsEl = $('turns');
-  let agentTurn = null; // { el, body } – consecutive agent sentences are grouped into one turn
+  /* ------------------------------------------------------------------ thread (chat) */
+  const thread = $('thread');
+  const scroller = $('scroller');
+  let agentTurn = null; // the agent message that collects activity, spoken text and cards
   let interimTurn = null;
   const pendingUser = []; // turns we sent ourselves, matched against the agent's user.utterance echo
+  let stick = true; // follow new content unless the reader scrolled up
 
-  function scrollTurns() { turnsEl.scrollTop = turnsEl.scrollHeight; }
-  function pruneTurns() {
-    const all = Array.from(turnsEl.querySelectorAll('.turn:not(.interim)'));
-    for (let i = 0; i < all.length - MAX_TURNS; i++) all[i].remove();
+  scroller.addEventListener('scroll', () => {
+    stick = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 140;
+  }, { passive: true });
+  function scrollTurns(force) {
+    if (force) stick = true;
+    if (!stick) return;
+    requestAnimationFrame(() => { scroller.scrollTop = scroller.scrollHeight; });
   }
-  function addTurn(who, text, interim = false) {
-    const empty = $('turnsEmpty');
-    if (empty) empty.remove();
+  // Images and cards grow after they are placed: keep following the bottom while the reader has not scrolled up.
+  if (window.ResizeObserver) new ResizeObserver(() => { if (stick) scroller.scrollTop = scroller.scrollHeight; }).observe(thread);
+  function hideWelcome() { const w = $('welcome'); if (w) w.remove(); }
+  /** Settled messages go above a live "listening" bubble, so that bubble stays at the bottom. */
+  function placeInThread(el) { thread.insertBefore(el, interimTurn && interimTurn.el !== el ? interimTurn.el : null); }
+
+  function addUserTurn(text, interim = false) {
+    hideWelcome();
     const body = h('div', { class: 'bubble' }, text || '');
-    const el = h('div', { class: `turn turn-${who}` + (interim ? ' interim' : '') }, body);
-    // settled turns go above a live interim bubble, so the bubble stays at the bottom
-    turnsEl.insertBefore(el, interimTurn && !interim ? interimTurn.el : null);
-    pruneTurns();
-    scrollTurns();
+    const el = h('div', { class: 'msg msg-user' + (interim ? ' interim' : '') }, body);
+    if (interim) thread.append(el); else placeInThread(el);
+    scrollTurns(true);
     return { el, body };
   }
-  function lastSettledTurn() {
-    const all = turnsEl.querySelectorAll('.turn:not(.interim)');
-    return all.length ? all[all.length - 1] : null;
+
+  function newAgentTurn() {
+    hideWelcome();
+    if (agentTurn) settleTurn(agentTurn, true);
+    const actNow = h('span', { class: 'act-now' }, 'Thinking…');
+    const actCount = h('span', { class: 'act-count' });
+    const head = h('button', { class: 'act-head', type: 'button', 'aria-expanded': 'false', title: 'Show every step' },
+      h('span', { class: 'act-ico' }), actNow, actCount, h('span', { class: 'act-chev', html: icon('chev') }));
+    const list = h('ol', { class: 'act-list' });
+    const act = h('div', { class: 'act busy' }, head, list);
+    const say = h('div', { class: 'say' });
+    const attach = h('div', { class: 'attach' });
+    const el = h('div', { class: 'msg msg-agent' },
+      h('span', { class: 'avatar', 'aria-hidden': 'true' }),
+      h('div', { class: 'msg-body' }, act, say, attach));
+    const t = {
+      el, act, head, actNow, actCount, list, say, attach,
+      steps: 0, busy: true, lastNow: '', startedAt: Date.now(), view: null, hasCards: false,
+      stores: new Set(), pages: new Set(), opened: new Set(), prefs: 0, filtered: 0, policy: false, order: false,
+    };
+    head.addEventListener('click', () => {
+      const open = !act.classList.contains('open');
+      act.classList.toggle('open', open);
+      head.setAttribute('aria-expanded', String(open));
+    });
+    placeInThread(el);
+    agentTurn = t;
+    lastEventAt = Date.now();
+    armSettle();
+    renderQuick();
+    scrollTurns();
+    return t;
   }
+  const ensureAgentTurn = () => (agentTurn && agentTurn.el.isConnected ? agentTurn : newAgentTurn());
+
   function agentSentence(text) {
-    if (!agentTurn || lastSettledTurn() !== agentTurn.el || !agentTurn.el.isConnected) agentTurn = addTurn('agent', '');
-    agentTurn.body.querySelectorAll('.sent.live').forEach((s) => s.classList.remove('live'));
-    if (agentTurn.body.childNodes.length) agentTurn.body.append(' ');
-    agentTurn.body.append(h('span', { class: 'sent live' }, text));
-    pruneTurns();
+    const t = ensureAgentTurn();
+    t.say.querySelectorAll('.sent.live').forEach((s) => s.classList.remove('live'));
+    if (t.say.childNodes.length) t.say.append(' ');
+    t.say.append(h('span', { class: 'sent live' }, text));
     scrollTurns();
   }
-  function endLiveSentence() { turnsEl.querySelectorAll('.sent.live').forEach((s) => s.classList.remove('live')); }
+  function endLiveSentence() { thread.querySelectorAll('.sent.live').forEach((s) => s.classList.remove('live')); }
 
   function showInterim(text) {
-    if (!interimTurn) interimTurn = addTurn('user', '', true);
+    if (!interimTurn) interimTurn = addUserTurn('', true);
     interimTurn.body.replaceChildren();
     if (text) interimTurn.body.textContent = text;
     else interimTurn.body.append(h('span', { class: 'dots', 'aria-label': 'listening' }, h('i'), h('i'), h('i')));
-    scrollTurns();
+    scrollTurns(true);
   }
   function settleInterim(text) {
     const t = interimTurn;
     interimTurn = null;
     if (!t) return null;
     if (!text) { t.el.remove(); return null; }
-    t.el.className = 'turn turn-user';
+    t.el.className = 'msg msg-user';
     t.body.textContent = text;
-    pruneTurns();
-    scrollTurns();
+    thread.append(t.el);
+    scrollTurns(true);
     return t;
   }
   function onUserUtterance(d) {
@@ -268,7 +308,176 @@
     while (pendingUser.length && now - pendingUser[0].at > 20000) pendingUser.shift();
     const mine = pendingUser.shift();
     if (mine && mine.turn.el.isConnected) { mine.turn.body.textContent = text; return; }
-    addTurn('user', text);
+    addUserTurn(text);
+    newAgentTurn();
+  }
+
+  /* ------------------------------------------------------------------ activity line ("Searching… / Reading…") */
+  const SKIP_STEP = new Set(['session_started', 'utterance', 'user_interrupt', 'barge_in', 'clarify_question']);
+  const SNAP_TAIL = /\s*\(snap_[^)]*\)\s*$/;
+  const REST_STATES = new Set(['IDLE', 'CLARIFY', 'AWAIT_CHOICE', 'APPROVE', 'DONE']);
+  let lastEventAt = 0;
+  let settleTimer = null;
+
+  function stepOf(ev) {
+    const d = ev.data || {};
+    let done = String(ev.summary || ev.type || '').replace(SNAP_TAIL, '');
+    let now = done;
+    let quote = null;
+    switch (ev.type) {
+      case 'preference_used':
+        done = 'Used your saved preference: ' + done.replace(/^Used saved preference:\s*/, '').replace(/\s*\((?:seeded profile|learned)\)\s*$/, '');
+        now = 'Checking your saved preferences';
+        break;
+      case 'preference_saved': now = 'Remembering this for next time'; break;
+      case 'search_issued': now = done.replace(/^Searched /, 'Searching '); break;
+      case 'search_result':
+        if (isNum(d.seen)) done = `Found ${d.seen} product${d.seen === 1 ? '' : 's'}` + (isNum(d.matched) && d.matched !== d.seen ? `, ${d.matched} match` : '');
+        now = 'Comparing results';
+        break;
+      case 'product_filtered': now = done.replace(/^Filtered out /, 'Filtering out '); break;
+      case 'ranking': now = 'Ranking the best matches'; break;
+      case 'options_presented': now = 'Preparing your options'; break;
+      case 'page_opened': now = done.replace(/^Opened /, 'Opening ').replace(/^Went back to /, 'Going back to '); break;
+      case 'page_navigate': now = done.replace(/^Scrolled to /, 'Scrolling to '); break;
+      case 'page_read': now = done.replace(/^Read /, 'Reading '); break;
+      case 'page_reload': now = 'Re-checking price and stock'; break;
+      case 'price_observed': now = d.title ? `Checking the price of ${d.title}` : 'Checking the price'; break;
+      case 'stock_checked': now = 'Checking stock'; break;
+      case 'answer_given': done = 'Found the answer on the page'; now = 'Looking for the answer on the page'; quote = findKey(d, 'quoted_span'); break;
+      case 'answer_not_on_page': done = 'Not on the page – Shopz does not guess'; now = 'Looking for the answer on the page'; break;
+      case 'injection_ignored': done = 'Ignored an instruction hidden in the page'; quote = first(d.quote); break;
+      case 'option_selected': now = 'Selecting your pick'; break;
+      case 'policy_decision': {
+        const dec = String(d.decision || '').toUpperCase();
+        done = dec === 'AUTO_APPROVE' ? 'Purchase rules: within your limits' : dec === 'DENY' ? 'Purchase rules: not allowed' : 'Purchase rules: needs your OK';
+        now = 'Checking your purchase rules';
+        break;
+      }
+      case 'approval_requested': done = 'Asked for your confirmation'; now = 'Waiting for your confirmation'; break;
+      case 'approval_granted': done = 'You confirmed the purchase'; break;
+      case 'approval_denied': done = 'Purchase not confirmed'; break;
+      case 'checkout_started': now = 'Checking out'; break;
+      case 'checkout_step': done = 'Checkout: ' + String(d.step || '').replace(/_/g, ' '); now = 'Checking out'; break;
+      case 'order_confirmed': now = 'Placing the order'; break;
+      default: break;
+    }
+    return { done, now, quote };
+  }
+
+  function turnHeadline(t) {
+    const parts = [];
+    const pl = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+    if (t.prefs && !t.stores.size) parts.push('used ' + pl(t.prefs, 'saved preference'));
+    if (t.stores.size) parts.push('searched ' + pl(t.stores.size, 'store'));
+    if (t.filtered) parts.push('filtered out ' + t.filtered);
+    if (t.pages.size) parts.push('read ' + pl(t.pages.size, 'product page'));
+    else if (t.opened.size) parts.push('opened ' + pl(t.opened.size, 'product page'));
+    if (t.policy) parts.push('checked your purchase rules');
+    if (t.order) parts.push('placed the order');
+    const s = parts.slice(0, 3).join(', ') || 'Worked it out';
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+  function renderActHead(t) {
+    t.act.classList.toggle('busy', t.busy);
+    t.act.classList.toggle('done', !t.busy);
+    t.head.querySelector('.act-ico').innerHTML = t.busy ? '' : icon('check');
+    t.actNow.textContent = t.busy ? (t.lastNow || 'Thinking') + '…' : turnHeadline(t);
+    t.actCount.textContent = t.steps ? `· ${t.steps} step${t.steps === 1 ? '' : 's'}` : '';
+    t.act.hidden = !t.busy && !t.steps;
+  }
+  function settleTurn(t, force) {
+    if (!t || !t.busy) return;
+    t.busy = false;
+    t.list.querySelectorAll('li.now').forEach((li) => { li.classList.remove('now'); li.classList.add('done'); });
+    renderActHead(t);
+    if (!force) renderQuick();
+  }
+  function armSettle() { clearTimeout(settleTimer); settleTimer = setTimeout(trySettle, 700); }
+  function trySettle() {
+    const t = agentTurn;
+    if (!t || !t.busy) return;
+    const quiet = Date.now() - lastEventAt;
+    const minBusy = Date.now() - t.startedAt < 1200;
+    if (!REST_STATES.has(curState) || quiet < 650 || minBusy) {
+      if (Date.now() - t.startedAt < 90000) armSettle(); else settleTurn(t);
+      return;
+    }
+    settleTurn(t);
+  }
+
+  function addStep(ev) {
+    if (!ev || SKIP_STEP.has(ev.type) || ev.actor === 'user') return;
+    const t = ensureAgentTurn();
+    const s = stepOf(ev);
+    const d = ev.data || {};
+    if (ev.type === 'preference_used') t.prefs++;
+    if (ev.type === 'search_issued') t.stores.add(first(d.store_name, d.store, ev.summary));
+    if (ev.type === 'product_filtered') t.filtered++;
+    if (ev.type === 'page_read' && d.sku) t.pages.add(d.sku);
+    if (ev.type === 'page_opened' && d.sku) t.opened.add(d.sku);
+    if (ev.type === 'policy_decision') t.policy = true;
+    if (ev.type === 'order_confirmed') t.order = true;
+    t.list.querySelectorAll('li.now').forEach((li) => { li.classList.remove('now'); li.classList.add('done'); });
+    const tone = toneOf(ev);
+    t.list.append(h('li', { class: (['warn', 'bad', 'good'].includes(tone) ? tone + ' ' : '') + 'now' },
+      h('span', { class: 'li-ico', html: icon(TYPE_ICON[ev.type] || 'dot') }),
+      h('span', null, s.done, s.quote ? h('span', { class: 'li-quote' }, `“${s.quote}”`) : null)));
+    t.steps++;
+    t.lastNow = s.now;
+    t.busy = true;
+    lastEventAt = Date.now();
+    renderActHead(t);
+    pageEvent(t, ev);
+    renderQuick();
+    armSettle();
+    scrollTurns();
+  }
+
+  /* ------------------------------------------------------------------ "now viewing" page card */
+  const SECTION_LABEL = { price: 'Price', delivery: 'Delivery', reviews: 'Reviews', returns: 'Returns', specs: 'Specs', gallery: 'Photos', seller: 'Seller', description: 'Description', overview: 'Overview' };
+  const PAGE_TYPES = new Set(['page_opened', 'page_navigate', 'page_read', 'page_reload', 'answer_given', 'answer_not_on_page', 'injection_ignored', 'stock_checked', 'price_observed']);
+  const artUrl = (sku, view) => '/api/art/' + encodeURIComponent(sku) + (view ? '?view=' + encodeURIComponent(view) : '');
+  function optionBySku(sku) { return options.find((o) => o && o.sku === sku) || null; }
+
+  function pageEvent(t, ev) {
+    if (!PAGE_TYPES.has(ev.type)) return;
+    const d = ev.data || {};
+    const sku = first(d.sku);
+    if (!sku || t.hasCards) return; // option cards already show which page is open
+    if (!t.view || t.view.sku !== sku) {
+      const o = optionBySku(sku);
+      t.view = {
+        sku,
+        title: first(d.title, d.page_title, o && o.title, sku),
+        store: first(storeName(d.merchant_id), o && (o.store_name || storeName(o.merchant_id))),
+        secs: new Map(), now: null, quote: null, note: null, el: h('div', { class: 'icard pview' }),
+      };
+      t.attach.prepend(t.view.el);
+    }
+    const v = t.view;
+    if (d.title && v.title === sku) v.title = d.title;
+    if (!v.store && d.merchant_id) v.store = storeName(d.merchant_id);
+    const sec = first(d.section);
+    if (ev.type === 'page_navigate' && sec) v.now = sec;
+    if (ev.type === 'page_read' && sec && sec !== 'all') { v.secs.set(sec, true); v.now = sec; }
+    if (ev.type === 'page_reload') { v.secs.clear(); v.now = null; }
+    if (ev.type === 'answer_given') { const q = findKey(d, 'quoted_span'); if (q) v.quote = String(q); }
+    if (ev.type === 'answer_not_on_page') v.note = `The page does not mention ${first(d.topic, 'that')} – Shopz will not guess.`;
+    if (ev.type === 'injection_ignored') v.note = 'Ignored an instruction hidden in a review – only you can tell Shopz what to do.';
+    renderView(v);
+  }
+  function renderView(v) {
+    fill(v.el,
+      h('div', { class: 'pview-img' }, h('img', { src: artUrl(v.sku), alt: '', loading: 'lazy' })),
+      h('div', { class: 'pview-main' },
+        h('div', { class: 'pview-url', html: icon('page') + ' ' + esc((v.store || 'Store') + ' › product page') }),
+        h('div', { class: 'pview-title' }, v.title),
+        v.secs.size || v.now ? h('div', { class: 'pview-secs' },
+          Array.from(new Set([...v.secs.keys(), ...(v.now ? [v.now] : [])])).map((s) =>
+            h('span', { class: 'sec' + (v.secs.has(s) ? ' read' : '') + (s === v.now ? ' now' : '') }, SECTION_LABEL[s] || s))) : null,
+        v.quote ? h('blockquote', { class: 'pview-quote' }, `“${v.quote}”`) : null,
+        v.note ? h('div', { class: 'pview-note', html: icon('alert') + esc(v.note) }) : null));
   }
 
   /* ------------------------------------------------------------------ mic pill */
@@ -304,7 +513,7 @@
   }
   function prefetch() {
     if (speech.muted) return;
-    speech.queue.slice(0, 3).forEach(fetchTts);
+    speech.queue.slice(0, 2).forEach(fetchTts); // two ahead keeps a single-voice server from queueing up
   }
   function dropItem(it) {
     try { if (it.ctrl) it.ctrl.abort(); } catch { /* ignore */ }
@@ -462,7 +671,7 @@
 
   function toggleMute() {
     speech.muted = !speech.muted;
-    $('mutedTag').hidden = !speech.muted;
+    renderMute();
     const it = speech.current;
     if (it && it.audio) it.audio.muted = speech.muted;
     if (speech.muted && it && it.utter && window.speechSynthesis && speechSynthesis.speaking) {
@@ -633,25 +842,22 @@
   }
 
   async function sendUtterance(text, turn) {
-    const t = turn || addTurn('user', text);
+    const t = turn || addUserTurn(text);
     pendingUser.push({ turn: t, at: Date.now() });
+    newAgentTurn();
     const r = await post('/api/utterance', { session_id: SESSION, text });
     if (!r) t.el.classList.add('failed');
   }
 
-  /* ------------------------------------------------------------------ step bar */
+  /* ------------------------------------------------------------------ progress (header) */
   const STEPS = ['CLARIFY', 'SEARCH', 'NARRATE', 'CHOOSE', 'VERIFY', 'POLICY', 'APPROVE', 'CHECKOUT', 'DONE'];
+  const STEP_LABEL = {
+    CLARIFY: 'Understanding', SEARCH: 'Searching', NARRATE: 'Presenting options', CHOOSE: 'Your choice', VERIFY: 'Re-checking',
+    POLICY: 'Checking your rules', APPROVE: 'Waiting for your OK', CHECKOUT: 'Checking out', DONE: 'Done',
+  };
   const STATE_TO_STEP = { AWAIT_CHOICE: 'CHOOSE', SELECT: 'CHOOSE', NAVIGATE: 'NARRATE', ANSWER: 'NARRATE', CONFIRM: 'DONE' };
-  const stepEls = [];
-  (function buildSteps() {
-    const nav = $('steps');
-    STEPS.forEach((s, i) => {
-      if (i) nav.append(h('span', { class: 'step-sep', 'aria-hidden': 'true' }, '›'));
-      const el = h('span', { class: 'step' }, s);
-      stepEls.push(el);
-      nav.append(el);
-    });
-  })();
+  const stepEls = STEPS.map(() => h('i'));
+  $('progressDots').append(...stepEls);
   function setStep(state) {
     const step = STATE_TO_STEP[state] || state;
     const idx = STEPS.indexOf(step);
@@ -659,70 +865,137 @@
       el.classList.toggle('now', i === idx);
       el.classList.toggle('past', idx >= 0 && i < idx);
     });
+    $('progress').hidden = idx < 0;
+    $('progressText').textContent = idx >= 0 ? STEP_LABEL[step] : '';
+    $('progress').title = idx >= 0 ? `Step ${idx + 1} of ${STEPS.length}: ${STEP_LABEL[step]}` : '';
   }
 
-  /* ------------------------------------------------------------------ chips */
+  /* ------------------------------------------------------------------ memory + constraints (drawer, welcome) */
   let memChips = [];
   let conChips = [];
   function renderChips() {
     const box = $('chips');
     box.replaceChildren();
-    if (!memChips.length && !conChips.length) { box.hidden = true; return; }
+    const wp = $('welcomeProfile');
+    if (!memChips.length && !conChips.length) { box.hidden = true; if (wp) wp.hidden = true; return; }
     box.hidden = false;
     if (memChips.length) {
-      box.append(h('span', { class: 'chips-label' }, 'Memory'));
-      for (const c of memChips) {
-        const src = c.source || 'seeded profile';
-        box.append(h('span', { class: 'chip mem' + (src === 'learned' ? ' learned' : '') },
-          h('span', null, c.label), h('span', { class: 'chip-tag' }, src)));
-      }
+      box.append(h('div', { class: 'ctx-label' }, 'What Shopz remembers', h('span', { class: 'ctx-meta' }, 'used for every search')),
+        h('div', { class: 'ctx-row' }, memChips.map((c) => {
+          const src = c.source || 'seeded profile';
+          return h('span', { class: 'mchip' + (src === 'learned' ? ' learned' : '') }, c.label, h('span', { class: 'src' }, src));
+        })));
     }
     if (conChips.length) {
-      if (memChips.length) box.append(h('span', { class: 'chips-gap' }));
-      box.append(h('span', { class: 'chips-label' }, 'Constraints'));
-      for (const c of conChips) box.append(h('span', { class: 'chip con' }, c.label));
+      box.append(h('div', { class: 'ctx-label' }, 'This request'),
+        h('div', { class: 'ctx-row' }, conChips.map((c) => h('span', { class: 'mchip con' }, c.label))));
+    }
+    if (wp) {
+      wp.hidden = !memChips.length;
+      fill(wp, h('span', null, 'Shopz remembers'), memChips.map((c) => h('span', { class: 'mchip' }, c.label)));
     }
   }
 
-  /* ------------------------------------------------------------------ options */
+  /* ------------------------------------------------------------------ product cards */
   let options = [];
   let narrated = -1;
+  let chosen = -1;
+  let cardSet = null; // { el, grid } – the newest option set in the thread
   const priceNow = {}; // sku → re-checked price from price_diff
-  function renderOptions() {
-    const box = $('options');
-    const rows = $('optionRows');
-    rows.replaceChildren();
-    if (!options.length) { box.hidden = true; return; }
-    box.hidden = false;
-    $('optionsMeta').textContent = `${options.length} pick${options.length === 1 ? '' : 's'} · ranked`;
-    options.forEach((o, i) => {
-      const r = o.rating || {};
-      const cur = (o.price && o.price.currency) || 'USD';
-      const changed = Boolean(o.sku) && priceNow[o.sku] !== undefined;
-      const etaIso = o.delivery && o.delivery.eta_date;
-      const tip = [
-        o.title,
-        r.stars !== undefined && r.stars !== null ? `★ ${r.stars}${r.count ? ` (${fmtInt(r.count)} reviews)` : ''}` : null,
-        etaIso ? `arrives ${niceDate(etaIso)}` : null,
-        o.rank && isNum(o.rank.score) ? `score ${o.rank.score.toFixed(2)}` : null,
-        o.why,
-      ].filter(Boolean).join(' · ');
-      rows.append(h('div', { class: 'opt' + (i === narrated ? ' on' : ''), title: tip },
-        h('div', { class: 'opt-rank' }, String((o.rank && o.rank.position) || i + 1)),
-        h('div', { class: 'opt-title' }, o.title || o.sku || 'Option'),
-        h('div', { class: 'opt-store' }, o.store_name || storeName(o.merchant_id) || ''),
-        h('div', { class: 'opt-amt' + (changed ? ' up' : '') }, money(changed ? priceNow[o.sku] : o.price, cur)),
-        h('div', { class: 'opt-eta' }, etaIso ? `arrives ${weekday(etaIso)}` : ''),
-        h('div', { class: 'opt-why' }, o.why || '')));
-    });
+  const ORD = ['first', 'second', 'third', 'fourth', 'fifth'];
+  const stars = (n) => (isNum(Number(n)) ? '★'.repeat(Math.round(Number(n))) : '');
+
+  function badgesFor(list) {
+    const out = list.map(() => null);
+    if (!list.length) return out;
+    out[0] = 'Best fit';
+    const minBy = (f) => {
+      let best = -1; let bv = Infinity;
+      list.forEach((o, i) => { const v = f(o); if (v !== null && v < bv) { bv = v; best = i; } });
+      return best;
+    };
+    const cheap = minBy((o) => amount(o.price));
+    if (cheap > 0 && !out[cheap]) out[cheap] = 'Cheapest';
+    const fast = minBy((o) => { const d = localDate(o.delivery && o.delivery.eta_date); return d ? d.getTime() : null; });
+    if (fast > 0 && !out[fast]) out[fast] = 'Fastest';
+    return out;
+  }
+
+  function buildCard(o, i, badge) {
+    const r = o.rating || {};
+    const cur = (o.price && o.price.currency) || 'USD';
+    const changed = Boolean(o.sku) && priceNow[o.sku] !== undefined && Math.abs(priceNow[o.sku] - amount(o.price)) >= 0.005;
+    const etaIso = o.delivery && o.delivery.eta_date;
+    const detail = h('dl', { class: 'pc-detail', hidden: true },
+      h('dt', null, 'Seller'), h('dd', null, first(o.seller && (o.seller.name || o.seller), o.store_name, storeName(o.merchant_id), '—')),
+      h('dt', null, 'Returns'), h('dd', null, first(o.return_policy && (o.return_policy.summary || o.return_policy), '—')),
+      h('dt', null, 'Shipping'), h('dd', null, o.delivery && amount(o.delivery.shipping_cost) !== null
+        ? (amount(o.delivery.shipping_cost) === 0 ? 'Free' : money(o.delivery.shipping_cost, cur)) : '—'),
+      o.rank && isNum(o.rank.score) ? [h('dt', null, 'Match score'), h('dd', null, o.rank.score.toFixed(2))] : null);
+    const card = h('article', {
+      class: 'pcard' + (i === narrated ? ' on' : '') + (i === chosen ? ' chosen' : ''),
+      tabindex: '0', role: 'button', 'aria-label': `Option ${i + 1}: ${o.title || o.sku}`,
+    },
+    h('div', { class: 'pc-img' },
+      o.sku ? h('img', { src: artUrl(o.sku), alt: '' }) : null,
+      badge ? h('span', { class: 'pc-badge' }, badge) : null,
+      h('span', { class: 'pc-view' }, h('span', { class: 'dots' }, h('i'), h('i'), h('i')), 'Viewing'),
+      h('span', { class: 'pc-pos' }, '#' + ((o.rank && o.rank.position) || i + 1))),
+    h('div', { class: 'pc-body' },
+      h('div', { class: 'pc-title', title: o.title || '' }, o.title || o.sku || 'Option'),
+      h('div', { class: 'pc-store' }, o.store_name || storeName(o.merchant_id) || ''),
+      h('div', { class: 'pc-price' },
+        changed ? h('s', null, money(o.price, cur)) : null,
+        h('b', null, money(changed ? priceNow[o.sku] : o.price, cur)),
+        changed ? h('span', { class: 'up' }, 'price changed') : null),
+      h('div', { class: 'pc-facts' },
+        r.stars !== undefined && r.stars !== null ? h('span', null, h('span', { class: 'stars', 'aria-hidden': 'true' }, stars(r.stars)), ` ${r.stars}${r.count ? ` (${fmtInt(r.count)})` : ''}`) : null,
+        etaIso ? h('span', null, `Arrives ${niceDate(etaIso)}`) : null),
+      o.why ? h('div', { class: 'pc-why' }, o.why) : null,
+      detail),
+    h('div', { class: 'pc-actions' },
+      h('button', {
+        class: 'btn', type: 'button',
+        onclick: (e) => { e.stopPropagation(); detail.hidden = !detail.hidden; e.currentTarget.textContent = detail.hidden ? 'Details' : 'Less'; },
+      }, 'Details'),
+      h('button', {
+        class: 'btn btn-primary', type: 'button',
+        onclick: (e) => { e.stopPropagation(); chosen = i; renderCards(); sendText(`Buy the ${ORD[i] || 'first'} one.`); },
+      }, i === chosen ? 'Chosen' : 'Choose this')));
+    const open = () => { if (narrated !== i) sendText(`Show me the ${ORD[i] || 'first'} one.`); };
+    card.addEventListener('click', open);
+    card.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target === card) { e.preventDefault(); open(); } });
+    return card;
+  }
+
+  function renderCards() {
+    if (!cardSet || !cardSet.el.isConnected) return;
+    const badges = badgesFor(options);
+    fill(cardSet.grid, options.map((o, i) => buildCard(o, i, badges[i])));
+  }
+  function showCards() {
+    if (cardSet) { cardSet.el.classList.add('stale'); cardSet.el.inert = true; cardSet = null; }
+    if (!options.length) return;
+    const t = ensureAgentTurn();
+    t.hasCards = true;
+    if (t.view) { t.view.el.remove(); t.view = null; }
+    const grid = h('div', { class: 'cards' });
+    const el = h('div', { class: 'cards-wrap' },
+      h('div', { class: 'cards-meta' }, `${options.length} pick${options.length === 1 ? '' : 's'} from your approved stores · tap a card to hear it, or choose one`),
+      grid);
+    t.attach.append(el);
+    cardSet = { el, grid };
+    renderCards();
+    scrollTurns();
   }
   function setNarrated(i) {
     narrated = Number.isInteger(i) ? i : -1;
-    $('optionRows').querySelectorAll('.opt').forEach((el, k) => el.classList.toggle('on', k === narrated));
+    if (cardSet) cardSet.grid.querySelectorAll('.pcard').forEach((el, k) => el.classList.toggle('on', k === narrated));
+    renderQuick();
   }
 
-  /* ------------------------------------------------------------------ policy / price diff / order */
-  const decision = { policy: null, approval: null, priceDiff: null, priceAt: 0, policyAt: 0, order: null };
+  /* ------------------------------------------------------------------ price change / policy / order cards */
+  const decision = { policy: null, approval: null, priceDiff: null, priceAt: 0, policyAt: 0, order: null, policyEl: null, pending: false };
   let priceBumpAt = 0;
   const DENY_RULES = new Set(['merchant_not_approved', 'category_in_blocklist', 'out_of_stock', 'instruction_from_page_content']);
 
@@ -755,126 +1028,176 @@
     }
   }
 
-  function renderDecision() {
-    const zone = $('decision');
-    const pc = $('policyCard');
-    const pd = $('priceCard');
-    const oc = $('orderCard');
+  function policyFacts(p) {
+    const inp = p.inputs || {};
+    const cur = p.currency || (inp.totals && inp.totals.currency) || 'USD';
+    return {
+      cur,
+      total: amount(first(p.total, inp.total, inp.totals && inp.totals.total)),
+      limit: amount(first(p.limit, inp.limit, inp.max_total, inp.auto_approve_max_total, inp.auto_approve && inp.auto_approve.max_total,
+        inp.policy && inp.policy.auto_approve && inp.policy.auto_approve.max_total)),
+      first: amount(first(inp.first_seen_price, inp.first_seen)),
+      now: amount(first(inp.current_price, inp.price_now, inp.at_checkout)),
+      merchant: storeName(first(inp.merchant_name, inp.store_name, inp.merchant_id, inp.merchant)),
+      maxDay: first(inp.max_orders_per_day, inp.policy && inp.policy.auto_approve && inp.policy.auto_approve.max_orders_per_day),
+      qty: first(inp.qty),
+      category: first(inp.category),
+      ordersToday: inp.orders_today,
+      version: first(inp.policy_version, inp.version),
+    };
+  }
 
-    // policy
+  function renderPolicyCard() {
     const p = decision.policy;
-    if (p) {
-      const inp = p.inputs || {};
-      const dec = String(p.decision || '').toUpperCase();
-      const cls = dec === 'AUTO_APPROVE' ? 'dec-auto' : dec === 'DENY' ? 'dec-deny' : 'dec-req';
-      const cur = p.currency || (inp.totals && inp.totals.currency) || 'USD';
-      const c = {
-        cur,
-        total: amount(first(p.total, inp.total, inp.totals && inp.totals.total)),
-        limit: amount(first(p.limit, inp.limit, inp.max_total, inp.auto_approve_max_total, inp.auto_approve && inp.auto_approve.max_total,
-          inp.policy && inp.policy.auto_approve && inp.policy.auto_approve.max_total)),
-        first: amount(first(inp.first_seen_price, inp.first_seen)),
-        now: amount(first(inp.current_price, inp.price_now, inp.at_checkout)),
-        merchant: storeName(first(inp.merchant_name, inp.store_name, inp.merchant_id, inp.merchant)),
-        maxDay: first(inp.max_orders_per_day, inp.policy && inp.policy.auto_approve && inp.policy.auto_approve.max_orders_per_day),
-        qty: first(inp.qty),
-        category: first(inp.category),
-      };
-      const rules = Array.isArray(p.rules) ? p.rules : [];
-      const lines = rules.map((r) => h('li', { class: DENY_RULES.has(r) ? 'deny' : '' }, ruleText(r, c)));
-      if (!lines.length && dec === 'AUTO_APPROVE') {
-        lines.push(h('li', { class: 'ok' }, c.limit !== null
-          ? `Total ${money(c.total, cur)} is within your ${money(c.limit, cur, true)} auto-buy limit`
-          : 'Within your auto-buy rules'));
-        if (c.merchant) lines.push(h('li', { class: 'ok' }, `${c.merchant} is an approved store`));
-      }
-      let hint = null;
-      if (dec === 'REQUIRE_APPROVAL') {
-        if (decision.approval === 'granted') hint = h('div', { class: 'pc-hint done' }, 'Approved by voice ✓');
-        else if (decision.approval === 'denied') hint = h('div', { class: 'pc-hint denied' }, 'Not approved');
-        else hint = h('div', { class: 'pc-hint' }, 'Say “confirm purchase”');
-      }
-      const meta = [
-        c.merchant,
-        c.qty !== null ? `qty ${c.qty}` : null,
-        isNum(Number(inp.orders_today)) && inp.orders_today !== null ? `orders today ${inp.orders_today}${c.maxDay !== null ? '/' + c.maxDay : ''}` : null,
-        first(inp.policy_version, inp.version) !== null ? `policy v${first(inp.policy_version, inp.version)}` : null,
-      ].filter(Boolean).join(' · ');
-      pc.className = 'card policy ' + cls;
-      fill(pc,
-        h('div', { class: 'card-top' }, h('span', { class: 'card-title' }, 'Purchase policy'), h('span', { class: 'dec-pill' }, dec || '—')),
-        h('div', { class: 'pc-total' }, h('b', null, money(c.total, cur)),
-          h('span', null, c.limit !== null ? `total · auto-buy limit ${money(c.limit, cur, true)}` : 'total')),
-        lines.length ? h('ul', { class: 'rules' }, lines) : null,
-        hint,
-        meta ? h('div', { class: 'pc-inputs' }, meta) : null,
-      );
-      pc.hidden = false;
-    } else {
-      pc.hidden = true;
+    const el = decision.policyEl;
+    if (!p || !el) return;
+    const dec = String(p.decision || '').toUpperCase();
+    const c = policyFacts(p);
+    const rules = Array.isArray(p.rules) ? p.rules : [];
+    const lines = rules.map((r) => h('li', { class: DENY_RULES.has(r) ? 'deny' : '' }, ruleText(r, c)));
+    if (!lines.length && dec === 'AUTO_APPROVE') {
+      lines.push(h('li', { class: 'ok' }, c.limit !== null
+        ? `Total ${money(c.total, c.cur)} is within your ${money(c.limit, c.cur, true)} auto-buy limit`
+        : 'Within your auto-buy rules'));
+      if (c.merchant) lines.push(h('li', { class: 'ok' }, `${c.merchant} is an approved store`));
     }
-
-    // price diff
-    const d = decision.priceDiff;
-    if (d) {
-      const before = amount(d.before);
-      const after = amount(d.after);
-      const cur = (d.before && d.before.currency) || (d.after && d.after.currency) || d.currency || 'USD';
-      const delta = before !== null && after !== null ? after - before : null;
-      const simulated = d.simulated === true || (priceBumpAt && Date.now() - priceBumpAt < 10 * 60 * 1000);
-      fill(pd,
-        h('div', { class: 'card-top' }, h('span', { class: 'card-title' }, 'Price changed'), simulated ? h('span', { class: 'tag sim' }, 'simulated') : null),
-        h('div', { class: 'pd-title' }, d.title || d.sku || ''),
-        h('div', { class: 'pd-prices' },
-          h('s', null, money(before, cur)), h('span', { class: 'arrow' }, '→'), h('b', null, money(after, cur)),
-          delta !== null && Math.abs(delta) >= 0.005
-            ? h('span', { class: 'delta' + (delta < 0 ? ' down' : '') }, (delta > 0 ? '+' : '−') + money(Math.abs(delta), cur))
-            : null),
-        h('div', { class: 'pd-ts' },
-          h('span', null, 'first seen ', h('b', null, hms(d.before_ts))),
-          h('span', null, 'now ', h('b', null, hms(d.after_ts)))),
-      );
-      pd.hidden = false;
-    } else {
-      pd.hidden = true;
+    const req = dec === 'REQUIRE_APPROVAL';
+    const title = dec === 'AUTO_APPROVE' ? 'Within your rules – buying now' : dec === 'DENY' ? 'Not allowed by your rules' : 'Needs your OK';
+    const sub = [c.merchant, c.version !== null ? `policy v${c.version}` : null,
+      isNum(Number(c.ordersToday)) && c.ordersToday !== null && c.ordersToday !== undefined ? `orders today ${c.ordersToday}${c.maxDay !== null ? '/' + c.maxDay : ''}` : null].filter(Boolean).join(' · ');
+    let foot = null;
+    if (req && decision.approval === 'granted') foot = h('div', { class: 'policy-state ok', html: icon('check') + 'Confirmed by you' });
+    else if (req && decision.approval === 'denied') foot = h('div', { class: 'policy-state no' }, 'Not purchased');
+    else if (req) {
+      foot = [
+        h('div', { class: 'policy-actions' },
+          h('button', { class: 'btn btn-primary', type: 'button', disabled: decision.pending, onclick: () => { decision.pending = true; renderPolicyCard(); sendText('Confirm purchase.'); } }, 'Confirm purchase'),
+          h('button', { class: 'btn', type: 'button', disabled: decision.pending, onclick: () => { decision.pending = true; renderPolicyCard(); sendText('Cancel.'); } }, 'Cancel')),
+        h('div', { class: 'policy-hint' }, 'Or say “confirm purchase”. Nothing is bought without it.'),
+      ];
     }
+    el.className = 'icard policy ' + (dec === 'AUTO_APPROVE' ? 'dec-auto' : dec === 'DENY' ? 'dec-deny' : 'dec-req');
+    fill(el,
+      h('div', { class: 'policy-head' },
+        h('span', { class: 'policy-ico', html: icon(dec === 'AUTO_APPROVE' ? 'check' : 'shield') }),
+        h('div', null, h('div', { class: 'policy-title' }, title), sub ? h('div', { class: 'policy-sub' }, sub) : null),
+        c.total !== null ? h('div', { class: 'policy-total' }, h('b', null, money(c.total, c.cur)),
+          h('span', null, c.limit !== null ? `limit ${money(c.limit, c.cur, true)}` : 'total')) : null),
+      lines.length ? h('ul', { class: 'rules' }, lines) : null,
+      foot);
+  }
 
-    // order
-    const o = decision.order;
-    if (o) {
-      const t = o.totals || {};
-      const ap = o.approval || {};
-      const mode = ap.mode === 'user_explicit'
-        ? `you, by ${ap.channel || 'voice'}${ap.transcript ? ` · “${ap.transcript}”` : ''}`
-        : ap.mode === 'auto' ? 'auto · within policy' : (ap.mode || '—');
-      const it0 = Array.isArray(o.items) && o.items[0] ? o.items[0] : null;
-      const item = it0 ? `${it0.title || it0.sku}${it0.qty > 1 ? ` × ${it0.qty}` : ''}` : null;
-      fill(oc,
-        h('div', { class: 'od-id' }, h('span', { class: 'card-title' }, 'Order'), h('b', null, o.order_id || '—'),
-          h('span', { class: 'ok' }, `✓ ${o.status || 'confirmed'}`), h('span', { class: 'od-total' }, money(t.total, t.currency))),
-        h('div', { class: 'od-item' }, h('span', { title: item || '' }, item || ''),
-          o.demo_data !== false ? h('span', { class: 'tag' }, 'demo order') : null),
-        h('div', { class: 'od-meta' }, 'Arrives ', h('b', null, niceDate(o.delivery_eta)), ' · executor ', h('code', null, o.executor || '—')),
-        h('div', { class: 'od-meta', title: mode }, 'Approval ', h('b', null, mode)),
-      );
-      oc.hidden = false;
-    } else {
-      oc.hidden = true;
-    }
+  function showPriceCard(d) {
+    const t = ensureAgentTurn();
+    const before = amount(d.before);
+    const after = amount(d.after);
+    const cur = (d.before && d.before.currency) || (d.after && d.after.currency) || d.currency || 'USD';
+    const delta = before !== null && after !== null ? after - before : null;
+    const simulated = d.simulated === true || (priceBumpAt && Date.now() - priceBumpAt < 10 * 60 * 1000);
+    t.attach.append(h('div', { class: 'icard' },
+      h('div', { class: 'icard-top', html: icon('tag') + 'Price changed since Shopz first saw it' + (simulated ? ' <span class="tag sim">simulated</span>' : '') }),
+      h('div', { class: 'pdiff-row' },
+        h('s', null, money(before, cur)), h('span', { 'aria-hidden': 'true' }, '→'), h('b', null, money(after, cur)),
+        delta !== null && Math.abs(delta) >= 0.005 ? h('span', { class: 'delta' + (delta < 0 ? ' down' : '') }, (delta > 0 ? '+' : '−') + money(Math.abs(delta), cur)) : null),
+      h('div', { class: 'pdiff-title' }, `${d.title || d.sku || ''} · first seen ${hms(d.before_ts)}, now ${hms(d.after_ts)}`)));
+    scrollTurns();
+  }
 
-    zone.classList.toggle('has-policy', Boolean(p));
-    zone.hidden = !(p || d || o);
+  function showPolicyCard(p) {
+    const t = ensureAgentTurn();
+    decision.policy = p;
+    decision.approval = null;
+    decision.pending = false;
+    decision.policyAt = Date.now();
+    decision.policyEl = h('div', { class: 'icard policy' });
+    t.attach.append(decision.policyEl);
+    renderPolicyCard();
+    scrollTurns();
+  }
+
+  function showOrderCard(o) {
+    const t = ensureAgentTurn();
+    const tot = o.totals || {};
+    const ap = o.approval || {};
+    const how = ap.mode === 'user_explicit'
+      ? `By you${ap.transcript ? ` – “${String(ap.transcript).replace(/[.\s]+$/, '')}”` : ''}`
+      : ap.mode === 'auto' ? 'Automatic – within your rules' : (ap.mode || '—');
+    const it0 = Array.isArray(o.items) && o.items[0] ? o.items[0] : null;
+    t.attach.append(h('div', { class: 'icard order' },
+      h('div', { class: 'order-head' },
+        h('span', { class: 'order-ico', html: icon('check') }),
+        h('div', null, h('div', { class: 'order-title' }, 'Order placed'), h('div', { class: 'order-id' }, o.order_id || '—')),
+        o.demo_data !== false ? h('span', { class: 'tag', style: 'margin-left:auto' }, 'demo order') : null),
+      h('div', { class: 'order-body' },
+        it0 && it0.sku ? h('div', { class: 'order-img' }, h('img', { src: artUrl(it0.sku), alt: '' })) : null,
+        h('dl', { class: 'order-facts' },
+          it0 ? [h('dt', null, 'Item'), h('dd', null, `${it0.title || it0.sku}${it0.qty > 1 ? ` × ${it0.qty}` : ''}`)] : null,
+          h('dt', null, 'Total'), h('dd', null, money(tot.total, tot.currency)),
+          h('dt', null, 'Arrives'), h('dd', null, niceDate(o.delivery_eta)),
+          h('dt', null, 'Approval'), h('dd', null, how)))));
+    scrollTurns();
   }
 
   function clearDecision() {
-    const now = Date.now();
-    if (now - decision.priceAt > 2000) decision.priceDiff = null;
-    if (now - decision.policyAt > 2000) { decision.policy = null; decision.approval = null; }
-    decision.order = null;
-    renderDecision();
+    decision.policy = null;
+    decision.approval = null;
+    decision.policyEl = null;
+    decision.pending = false;
   }
 
-  /* ------------------------------------------------------------------ audit timeline */
+  /* ------------------------------------------------------------------ quick replies */
+  let lastClarify = null;
+  const START_CHIPS = [
+    ['Running shoes for a half marathon', 'I need running shoes for a half marathon in three weeks.'],
+    ['Reorder my usual coffee', 'Reorder my usual coffee.'],
+  ];
+  function quickReplies() {
+    if (curState === 'APPROVE' && decision.policy && !decision.approval && !decision.pending) {
+      return [['Confirm purchase', 'Confirm purchase.', true], ['Cancel', 'Cancel.']];
+    }
+    if (curState === 'CLARIFY') {
+      const missing = (lastClarify && lastClarify.missing) || [];
+      if (missing.includes('deadline')) return [['By next Friday', 'By next Friday.'], ['Within two weeks', 'Within two weeks.']];
+      return START_CHIPS;
+    }
+    if (options.length && ['AWAIT_CHOICE', 'NARRATE', 'ANSWER', 'NAVIGATE', 'SELECT'].includes(curState)) {
+      const i = narrated >= 0 ? narrated : 0;
+      const list = [['Show reviews', 'Show me the reviews.'], ['Is it waterproof?', 'Is it waterproof?'], ['Return policy', "What's the return policy?"]];
+      if (i < options.length - 1) list.push(['Next option', 'Next one.']);
+      if (i > 0) list.push(['Go back', 'Go back.']);
+      list.push(['Buy this', 'Buy this one.', true]);
+      return list;
+    }
+    if (curState === 'DONE' || curState === 'IDLE') return thread.querySelector('.msg') ? START_CHIPS : [];
+    return [];
+  }
+  function chipButtons(list) {
+    return list.map(([label, text, primary], k) => h('button', {
+      class: 'qchip' + (primary ? ' primary' : ''), type: 'button', style: `animation-delay:${k * 40}ms`,
+      onclick: () => sendText(text),
+    }, label));
+  }
+  let quickSig = '';
+  function renderQuick() {
+    const box = $('quick');
+    const busy = Boolean(agentTurn && agentTurn.busy);
+    const list = busy ? [] : quickReplies();
+    const sig = list.map((x) => x[1]).join('|');
+    if (sig === quickSig) return;
+    quickSig = sig;
+    fill(box, chipButtons(list));
+    box.hidden = !list.length;
+    scrollTurns();
+  }
+
+  /* ------------------------------------------------------------------ drawer + audit trail */
+  const drawer = $('drawer');
+  function setDrawer(open) {
+    drawer.classList.toggle('open', open);
+    drawer.setAttribute('aria-hidden', String(!open));
+    $('scrim').hidden = !open;
+    $('actBtn').setAttribute('aria-expanded', String(open));
+  }
   const tl = $('tl');
   const rowsByKey = new Map();
   const MAX_ROWS = 500;
@@ -887,16 +1210,15 @@
     const row = h('div', { class: `ev tone-${tone}` });
     row.dataset.seq = isNum(ev.seq) ? String(ev.seq) : '';
     const line = h('div', { class: 'ev-line', role: 'button', title: 'Show details' },
-      h('span', { class: 'ev-time' }, hms(ev.ts)),
       h('span', { class: 'ev-ico', html: icon(TYPE_ICON[ev.type] || 'dot') }),
-      h('span', { class: 'ev-type' }, ev.type || 'event'),
-      h('span', { class: 'ev-sum', title: ev.summary || null }, ev.summary || ''),
-      h('span', { class: 'ev-seq' }, isNum(ev.seq) ? '#' + ev.seq : ''));
+      h('span', { class: 'ev-sum' }, ev.summary || ev.type || ''),
+      h('span', { class: 'ev-seq' }, isNum(ev.seq) ? '#' + ev.seq : ''),
+      h('span', { class: 'ev-meta' }, `${hms(ev.ts)} · ${ev.type || 'event'}`));
     row.append(line);
     if (quote || sha) {
       row.append(h('div', { class: 'ev-extra' },
         quote ? h('span', { class: 'ev-quote' }, `“${quote}”`) : null,
-        sha ? h('span', { class: 'ev-sha' }, 'sha256 ' + short(sha)) : null));
+        sha ? h('span', { class: 'ev-sha' }, 'page snapshot sha256 ' + short(sha)) : null));
     }
     line.addEventListener('click', () => toggleRow(row, ev, quote, sha));
     return row;
@@ -925,24 +1247,23 @@
     const row = buildRow(ev);
     if (key !== null) rowsByKey.set(key, row);
 
-    // newest first, ordered by seq; keep the reader's place if they scrolled down
+    // newest first, ordered by seq
     const seq = isNum(ev.seq) ? ev.seq : Infinity;
     let before = null;
     for (const r of tl.children) {
       const s = r.dataset && r.dataset.seq !== '' ? Number(r.dataset.seq) : Infinity;
       if (s < seq) { before = r; break; }
     }
-    const keepPlace = tl.scrollTop > 4;
-    const oldHeight = tl.scrollHeight;
     tl.insertBefore(row, before);
-    if (keepPlace && row.getBoundingClientRect().top < tl.getBoundingClientRect().top) {
-      tl.scrollTop += tl.scrollHeight - oldHeight;
-    }
     if (fresh) row.classList.add('fresh');
     while (tl.children.length > MAX_ROWS) tl.lastElementChild.remove();
+    $('actBtnCount').textContent = String(rowsByKey.size);
 
+    if (fresh) addStep(ev);
+    if (ev.type === 'clarify_question') lastClarify = ev.data || null;
+    if (ev.type === 'option_selected' && Number.isInteger(ev.data && ev.data.option_index)) { chosen = ev.data.option_index; renderCards(); }
     if (ev.type === 'approval_granted' || ev.type === 'approval_denied') {
-      if (decision.policy) { decision.approval = ev.type === 'approval_granted' ? 'granted' : 'denied'; renderDecision(); }
+      if (decision.policy) { decision.approval = ev.type === 'approval_granted' ? 'granted' : 'denied'; decision.pending = false; renderPolicyCard(); renderQuick(); }
     }
     scheduleVerify();
   }
@@ -973,6 +1294,12 @@
       verifyFailed = false;
       const n = Number(v.count) || 0;
       el.className = 'chain ' + (v.ok ? 'ok' : 'bad');
+      const badge = $('actBtnChain');
+      badge.className = 'act-btn-chain' + (v.ok ? '' : ' bad');
+      badge.textContent = n ? (v.ok ? '✓' : '✗') : '';
+      badge.title = v.ok ? 'Hash chain verified' : 'Hash chain broken';
+      $('actBtnCount').textContent = String(n);
+      $('drawerSub').textContent = n ? `${n} event${n === 1 ? '' : 's'} · ${v.ok ? 'hash chain verified' : 'hash chain broken'}` : 'Every page read, price seen and rule applied';
       fill(el,
         h('span', { class: 'chain-main' }, v.ok
           ? `Hash chain verified ✓ (${n} event${n === 1 ? '' : 's'})`
@@ -997,12 +1324,21 @@
       if (Number.isInteger(d.option_index)) setNarrated(d.option_index);
       else if (['IDLE', 'CLARIFY', 'SEARCH'].includes(curState)) setNarrated(-1);
       if (curState === 'VERIFY' && !PURCHASE_STATES.includes(prev)) {
-        clearDecision(); // a new purchase starts: cards of the previous one are stale
+        clearDecision(); // a new purchase starts
         if ((prev === 'DONE' || prev === 'IDLE') && !Number.isInteger(d.option_index) && options.length) {
           options = []; // e.g. "reorder my usual coffee" – not one of the presented options
-          renderOptions();
+          if (cardSet) { cardSet.el.classList.add('stale'); cardSet.el.inert = true; cardSet = null; }
         }
       }
+      if (prev === 'APPROVE' && !['APPROVE', 'CHECKOUT', 'DONE', 'CONFIRM'].includes(curState) && decision.policy && !decision.approval) {
+        decision.approval = 'denied'; // cancelled or moved on without confirming
+        decision.pending = false;
+        renderPolicyCard();
+      }
+      if (['IDLE', 'CLARIFY', 'SEARCH'].includes(curState) && prev === 'DONE') chosen = -1;
+      lastEventAt = Date.now();
+      armSettle();
+      renderQuick();
     },
     'user.utterance': onUserUtterance,
     'agent.say': enqueueSay,
@@ -1012,19 +1348,21 @@
     options(d) {
       options = Array.isArray(d.options) ? d.options : [];
       narrated = -1;
-      renderOptions();
+      chosen = -1;
       clearDecision();
+      showCards();
+      renderQuick();
     },
-    policy(d) { decision.policy = d; decision.approval = null; decision.policyAt = Date.now(); renderDecision(); },
+    policy(d) { showPolicyCard(d); renderQuick(); },
     price_diff(d) {
       decision.priceDiff = d;
       decision.priceAt = Date.now();
-      if (d.sku && amount(d.after) !== null) { priceNow[d.sku] = amount(d.after); renderOptions(); }
-      renderDecision();
+      if (d.sku && amount(d.after) !== null) { priceNow[d.sku] = amount(d.after); renderCards(); }
+      showPriceCard(d);
     },
     order(d) {
       decision.order = d.order || d;
-      renderDecision();
+      showOrderCard(decision.order);
       refreshVerify();
     },
     audit(d) { addAudit(d.event || d, true); },
@@ -1126,7 +1464,8 @@
     }
     if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
     if (e.key === '?') { e.preventDefault(); toggleHelp(); return; }
-    if (e.key === 'Escape') { toggleHelp(false); return; }
+    if (e.key === 'Escape') { toggleHelp(false); setDrawer(false); return; }
+    if (e.code === 'KeyA' && !e.shiftKey) { setDrawer(!drawer.classList.contains('open')); return; }
     if (e.code === 'KeyM') { toggleMute(); return; }
     if (e.code === 'KeyP' && e.shiftKey) { e.preventDefault(); priceBump(); return; }
     if (e.code === 'KeyR' && e.shiftKey) { e.preventDefault(); resetAll(); }
@@ -1150,20 +1489,44 @@
   ['pointerup', 'pointercancel', 'lostpointercapture'].forEach((t) => mic.addEventListener(t, () => pttEnd('pointer')));
   mic.addEventListener('contextmenu', (e) => e.preventDefault());
 
-  $('textForm').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const input = $('textInput');
-    const text = input.value.trim();
-    if (!text) return;
-    input.value = '';
+  /** Chips, cards and buttons use the same path as typing: barge in if the agent is talking, then send. */
+  async function sendText(text) {
+    const t = String(text || '').trim();
+    if (!t) return;
     if (isSpeaking()) {
       stopSpeech();
       await post('/api/barge-in', { session_id: SESSION });
     }
-    sendUtterance(text);
+    sendUtterance(t);
+  }
+
+  const input = $('textInput');
+  const syncSend = () => { $('sendBtn').disabled = !input.value.trim(); };
+  input.addEventListener('input', syncSend);
+  $('textForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    syncSend();
+    sendText(text);
   });
 
-  if (!SR) {
+  function renderMute() {
+    const b = $('muteBtn');
+    b.innerHTML = icon(speech.muted ? 'speakerOff' : 'speaker');
+    b.setAttribute('aria-pressed', String(speech.muted));
+    b.title = speech.muted ? 'Voice off – press M to unmute' : 'Voice on – press M to mute';
+    b.setAttribute('aria-label', speech.muted ? 'Unmute the agent voice' : 'Mute the agent voice');
+  }
+  $('muteBtn').addEventListener('click', (e) => { toggleMute(); e.currentTarget.blur(); });
+  $('actBtn').addEventListener('click', (e) => { setDrawer(!drawer.classList.contains('open')); e.currentTarget.blur(); });
+  $('drawerClose').innerHTML = icon('x');
+  $('drawerClose').addEventListener('click', () => setDrawer(false));
+  $('scrim').addEventListener('click', () => setDrawer(false));
+  fill($('welcomeChips'), chipButtons(START_CHIPS));
+
+  if (!SR && !(navigator.mediaDevices && window.MediaRecorder)) {
     const hint = $('micHint');
     hint.textContent = 'Voice input is not available in this browser – type below';
     hint.classList.add('warn');
@@ -1176,6 +1539,7 @@
 
   /* ------------------------------------------------------------------ start */
   setStep('IDLE');
+  renderMute();
   setMicPill();
   setConn('down');
   connect();
