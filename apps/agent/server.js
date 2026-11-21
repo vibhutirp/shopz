@@ -35,6 +35,8 @@ async function main() {
   const llmModule = await import('./src/llm.js');
   const { synthesize } = await import('./src/tts.js');
   const { createOrchestrator } = await import('./src/orchestrator.js');
+  const { createLiveOrchestrator, LIVE_NOTICE } = await import('./src/live/orchestrator.js');
+  const { shopsFromEnv } = await import('./src/live/shops.js');
 
   // ---------------------------------------------------------------- SSE hub
   const clients = new Map(); // session_id → Set<res>
@@ -82,6 +84,21 @@ async function main() {
     audit, prefs, store, browser, merchants, emit, llm,
     searchMerchants: search, filterAndRank, evaluate, policy: DEFAULT_POLICY,
   });
+  // Live web mode: real stores, read in real time, hand-off instead of a purchase. Demo stays the default.
+  const DEFAULT_MODE = String(process.env.SHOPZ_MODE || '').toLowerCase() === 'live' ? 'live' : 'demo';
+  const liveShops = shopsFromEnv();
+  const { webSearchFromEnv } = await import('./src/live/websearch.js');
+  const webSearch = webSearchFromEnv();
+  const live = createLiveOrchestrator({ audit, emit, browser, evaluate, shops: liveShops, llm: llmConfigured ? llm : null, webSearch });
+  log('live', `default mode=${DEFAULT_MODE} · ${liveShops.length} live stores · local model ${process.env.LIVE_LLM_URL ? 'on' : 'off'} · web search ${webSearch ? 'on' : 'off'}`);
+  const modes = new Map(); // session_id → 'demo' | 'live' (set by the panel; a session never switches mid-way)
+  function modeOf(session_id, requested) {
+    const r = String(requested || '').toLowerCase();
+    if ((r === 'live' || r === 'demo') && !modes.has(session_id)) modes.set(session_id, r);
+    if (modes.size > 5000) modes.delete(modes.keys().next().value);
+    return modes.get(session_id) || DEFAULT_MODE;
+  }
+  const orch = (session_id, requested) => (modeOf(session_id, requested) === 'live' ? live : orchestrator);
 
   // ---------------------------------------------------------------- helpers
   function send(res, status, body, headers = {}) {
@@ -151,7 +168,7 @@ async function main() {
     res.write(': connected\n\n');
     if (!clients.has(session_id)) clients.set(session_id, new Set());
     clients.get(session_id).add(res);
-    const s = orchestrator.session(session_id);
+    const s = orch(session_id).session(session_id);
     res.write(`event: state\ndata: ${JSON.stringify({ state: s.state, option_index: s.option_index })}\n\n`);
     const timer = setInterval(() => { try { res.write(': keep-alive\n\n'); } catch { /* ignore */ } }, KEEPALIVE_MS);
     const close = () => {
@@ -182,7 +199,15 @@ async function main() {
     const q = url.searchParams;
 
     if (req.method === 'GET' && p === '/api/health') {
-      return send(res, 200, { ok: true, store: store.kind, browser: browser.mode, llm: llmConfigured });
+      return send(res, 200, { ok: true, store: store.kind, browser: browser.mode, llm: llmConfigured, default_mode: DEFAULT_MODE });
+    }
+    if (req.method === 'GET' && p === '/api/config') {
+      return send(res, 200, { default_mode: DEFAULT_MODE, live: { notice: LIVE_NOTICE, stores: liveShops.map((x) => ({ host: x.host, name: x.name, categories: x.categories })) } });
+    }
+    if (req.method === 'GET' && p === '/api/live/shops') {
+      const s = sid(q.get('session'));
+      if (!s) return send(res, 400, { error: 'session is required' });
+      return send(res, 200, { stores: live.listShops(s) });
     }
     if (req.method === 'GET' && p.startsWith('/api/art/')) {
       // Product illustration for the panel cards: the same fictional inline SVG the demo stores render.
@@ -202,7 +227,7 @@ async function main() {
       const box = pollBox(s);
       const since = Number(q.get('since'));
       if (!Number.isFinite(since) || since < 0) {
-        const st = orchestrator.session(s);
+        const st = orch(s, q.get('mode')).session(s);
         return send(res, 200, { next: box.seq, events: [{ type: 'state', data: { state: st.state, option_index: st.option_index } }] }, { 'Cache-Control': 'no-store' });
       }
       const pick = () => box.events.filter((e) => e.n > since);
@@ -219,6 +244,7 @@ async function main() {
     if (req.method === 'GET' && p === '/api/events') {
       const s = sid(q.get('session'));
       if (!s) return send(res, 400, { error: 'session is required' });
+      modeOf(s, q.get('mode'));
       return openEvents(req, res, s);
     }
     if (req.method === 'POST' && p === '/api/stt') {
@@ -260,25 +286,25 @@ async function main() {
         const s = sid(body.session_id);
         const text = typeof body.text === 'string' ? body.text : '';
         if (!s || !text.trim()) return send(res, 400, { error: 'session_id and text are required' });
-        orchestrator.handle(s, text, { sync: false }).catch((err) => emit(s, 'error', { message: err.message }));
+        orch(s, body.mode).handle(s, text, { sync: false }).catch((err) => emit(s, 'error', { message: err.message }));
         return send(res, 200, { ok: true });
       }
       case '/api/barge-in': {
         const s = sid(body.session_id);
         if (!s) return send(res, 400, { error: 'session_id is required' });
-        orchestrator.bargeIn(s).catch((err) => emit(s, 'error', { message: err.message }));
+        orch(s).bargeIn(s).catch((err) => emit(s, 'error', { message: err.message }));
         return send(res, 200, { ok: true });
       }
       case '/api/speaking': {
         const s = sid(body.session_id);
         if (!s || !body.say_id) return send(res, 400, { error: 'session_id and say_id are required' });
-        orchestrator.speaking(s, String(body.say_id)).catch(() => {});
+        orch(s).speaking(s, String(body.say_id)).catch(() => {});
         return send(res, 200, { ok: true });
       }
       case '/api/speech-done': {
         const s = sid(body.session_id);
         if (!s || !body.say_id) return send(res, 400, { error: 'session_id and say_id are required' });
-        orchestrator.speechDone(s, String(body.say_id)).catch((err) => emit(s, 'error', { message: err.message }));
+        orch(s).speechDone(s, String(body.say_id)).catch((err) => emit(s, 'error', { message: err.message }));
         return send(res, 200, { ok: true });
       }
       case '/api/session/text': {
@@ -286,7 +312,7 @@ async function main() {
         if (!text.trim()) return send(res, 400, { error: 'text is required' });
         const s = sid(body.session_id) || newSessionId();
         const before = await lastSeq(s);
-        const out = await orchestrator.handle(s, text, { sync: true });
+        const out = await orch(s, body.mode).handle(s, text, { sync: true });
         const events = newEventsSince(await audit.list(s), before);
         return send(res, 200, { session_id: s, replies: out.replies, state: out.state, events });
       }
@@ -294,13 +320,14 @@ async function main() {
         const text = typeof body.message === 'string' ? body.message : typeof body.text === 'string' ? body.text : '';
         if (!text.trim()) return send(res, 400, { error: 'message is required' });
         const s = sid(body.session_id) || newSessionId();
-        const out = await orchestrator.handle(s, text, { sync: true });
+        const out = await orch(s, body.mode).handle(s, text, { sync: true });
         return send(res, 200, { session_id: s, reply: out.replies.join(' ') });
       }
       case '/api/admin/price-bump': {
         // Operator hotkey: simulated +$10 on the first presented option. Not part of the user's audit trail.
         const s = sid(body.session_id);
         if (!s) return send(res, 400, { error: 'session_id is required' });
+        if (modeOf(s) === 'live') return send(res, 409, { error: 'price simulation is only for the demo stores' });
         const view = orchestrator.session(s);
         const opt = view.options && view.options[0];
         if (!opt) return send(res, 409, { error: 'no options presented yet' });
@@ -319,9 +346,15 @@ async function main() {
         const results = await Promise.all(merchants.map(async (m) => {
           try { await postMerchant(m.base, '/admin/reset', {}); return { store: m.id, ok: true }; } catch (err) { return { store: m.id, ok: false, error: err.message }; }
         }));
-        if (s) orchestrator.reset(s);
+        if (s) { orchestrator.reset(s); live.reset(s); }
         log('admin', `reset merchants (${results.map((r) => `${r.store}:${r.ok ? 'ok' : 'failed'}`).join(', ')})${s ? ` + session ${s}` : ''}`);
         return send(res, 200, { ok: results.every((r) => r.ok), merchants: results, session_id: s });
+      }
+      case '/api/live/shops': {
+        const s = sid(body.session_id);
+        if (!s) return send(res, 400, { error: 'session_id is required' });
+        const stores = await live.updateShops(s, { enable: body.enable || [], disable: body.disable || [], add: body.add || null, remove: body.remove || null });
+        return send(res, 200, { stores });
       }
       default:
         return send(res, 404, { error: 'not found' });

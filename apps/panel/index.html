@@ -12,7 +12,11 @@
     <header class="hdr">
       <div class="hdr-left">
         <div class="brand" aria-label="Shopz"><span class="brand-mark" aria-hidden="true"></span>Shopz</div>
-        <div class="badge" title="All stores, products and ratings are fictional demo data. Preferences are pre-seeded.">Demo data: fictional stores, products and ratings · preferences pre-seeded</div>
+        <div id="modeSwitch" class="mode-switch" role="group" aria-label="Mode">
+          <button type="button" data-mode="demo" title="Fictional demo stores (pitch script)">Demo</button>
+          <button type="button" data-mode="live" title="Real stores on the web, read in real time – checkout happens in the store">Live web</button>
+        </div>
+        <div id="badge" class="badge" title="All stores, products and ratings are fictional demo data. Preferences are pre-seeded.">Demo data: fictional stores, products and ratings · preferences pre-seeded</div>
       </div>
       <div id="progress" class="progress" aria-label="Current step" hidden>
         <span id="progressDots" class="progress-dots" aria-hidden="true"></span>
@@ -41,7 +45,8 @@
           <div id="welcome" class="welcome">
             <div class="welcome-mark" aria-hidden="true"></div>
             <h1>What can I find for you?</h1>
-            <p>Talk or type. Shopz searches your approved stores, reads every page out loud and shows each step it takes.</p>
+            <p id="welcomeText">Talk or type. Shopz searches your approved stores, reads every page out loud and shows each step it takes.</p>
+            <div id="liveNote" class="live-note" hidden></div>
             <div id="welcomeChips" class="quick welcome-chips"></div>
             <div id="welcomeProfile" class="welcome-profile" hidden></div>
           </div>
@@ -77,6 +82,14 @@
       </div>
       <div class="drawer-body">
         <section id="chips" class="ctx" aria-label="Memory and constraints" hidden></section>
+        <section id="storesSec" class="ctx-sec stores" aria-label="Allowed stores" hidden>
+          <div class="ctx-label">Stores Shopz may search <span class="ctx-meta">live web · only these are opened</span></div>
+          <div id="storeList" class="store-list"></div>
+          <form id="storeAdd" class="store-add" autocomplete="off">
+            <input id="storeInput" type="text" placeholder="Add a store, e.g. www.example.com" aria-label="Add a store address" spellcheck="false">
+            <button class="btn" type="submit">Add</button>
+          </form>
+        </section>
         <section class="ctx-sec">
           <div class="ctx-label">Audit trail <span class="ctx-meta">newest first · tap a row for the raw event</span></div>
           <div id="tl" class="tl-list">

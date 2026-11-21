@@ -118,6 +118,11 @@
   }
   const SESSION = newId();
   try { sessionStorage.setItem('shopz.session_id', SESSION); } catch { /* storage may be disabled */ }
+  // Demo (fictional stores, pitch script) or Live web (real stores, hand-off to the store's checkout). ?mode=live|demo wins, then the last choice.
+  const MODE_PARAM = (new URLSearchParams(location.search).get('mode') || '').toLowerCase();
+  let MODE = ['live', 'demo'].includes(MODE_PARAM) ? MODE_PARAM : (() => { try { return localStorage.getItem('shopz.mode') || ''; } catch { return ''; } })();
+  const LIVE_NOTICE = 'Live web results · prices from the store pages · checkout happens in the store';
+  const isLive = () => MODE === 'live';
 
   /* ------------------------------------------------------------------ toasts + HTTP */
   const toastSeen = new Map();
@@ -182,6 +187,7 @@
     shield: '<path d="M8 1.5l5.25 2v4.25c0 3.25-2.25 5.75-5.25 6.75-3-1-5.25-3.5-5.25-6.75V3.5z"/>',
     cart: '<path d="M1.5 2h2l1.75 8h7.25l1.5-5.5H4.1"/><circle cx="6.25" cy="13" r="1"/><circle cx="12" cy="13" r="1"/>',
     chev: '<path d="M6 3.5L10.5 8 6 12.5"/>',
+    out: '<path d="M9 2.25h4.75V7M13.5 2.5L7.5 8.5M11.75 9.5v4.25h-9.5v-9.5H6.5"/>',
     speaker: '<path d="M2.5 6h2.5l3.5-3v10l-3.5-3H2.5z"/><path d="M11 5.5a3.5 3.5 0 0 1 0 5M12.75 3.5a6 6 0 0 1 0 9"/>',
     speakerOff: '<path d="M2.5 6h2.5l3.5-3v10l-3.5-3H2.5z"/><path d="M11 6l3.5 4M14.5 6L11 10"/>',
   };
@@ -194,7 +200,7 @@
     page_reload: 'reload', page_read: 'eye', answer_given: 'chat', answer_not_on_page: 'chat', injection_ignored: 'alert',
     option_selected: 'check', price_observed: 'tag', stock_checked: 'box', policy_decision: 'shield',
     approval_requested: 'shield', approval_granted: 'check', approval_denied: 'x', checkout_started: 'cart',
-    checkout_step: 'cart', order_confirmed: 'box', error: 'alert', fallback_used: 'reload',
+    checkout_step: 'cart', order_confirmed: 'box', error: 'alert', fallback_used: 'reload', handoff: 'out', web_search: 'search',
   };
   function toneOf(ev) {
     const t = ev.type;
@@ -360,6 +366,9 @@
       case 'checkout_started': now = 'Checking out'; break;
       case 'checkout_step': done = 'Checkout: ' + String(d.step || '').replace(/_/g, ' '); now = 'Checking out'; break;
       case 'order_confirmed': now = 'Placing the order'; break;
+      case 'handoff': done = 'Ready to buy – handed off to the store (Shopz does not pay)'; now = 'Getting it ready in the store'; break;
+      case 'web_search': now = 'Searching the web'; break;
+      case 'fallback_used': now = 'Trying another way'; break;
       default: break;
     }
     return { done, now, quote };
@@ -375,6 +384,7 @@
     else if (t.opened.size) parts.push('opened ' + pl(t.opened.size, 'product page'));
     if (t.policy) parts.push('checked your purchase rules');
     if (t.order) parts.push('placed the order');
+    if (t.handoff) parts.push('handed off to the store');
     const s = parts.slice(0, 3).join(', ') || 'Worked it out';
     return s.charAt(0).toUpperCase() + s.slice(1);
   }
@@ -418,6 +428,7 @@
     if (ev.type === 'page_opened' && d.sku) t.opened.add(d.sku);
     if (ev.type === 'policy_decision') t.policy = true;
     if (ev.type === 'order_confirmed') t.order = true;
+    if (ev.type === 'handoff') t.handoff = true;
     t.list.querySelectorAll('li.now').forEach((li) => { li.classList.remove('now'); li.classList.add('done'); });
     const tone = toneOf(ev);
     t.list.append(h('li', { class: (['warn', 'bad', 'good'].includes(tone) ? tone + ' ' : '') + 'now' },
@@ -469,7 +480,7 @@
   }
   function renderView(v) {
     fill(v.el,
-      h('div', { class: 'pview-img' }, h('img', { src: artUrl(v.sku), alt: '', loading: 'lazy' })),
+      h('div', { class: 'pview-img' }, h('img', (() => { const o = optionBySku(v.sku); return o && o.image_url ? { class: 'photo', src: o.image_url, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' } : { src: artUrl(v.sku), alt: '', loading: 'lazy' }; })())),
       h('div', { class: 'pview-main' },
         h('div', { class: 'pview-url', html: icon('page') + ' ' + esc((v.store || 'Store') + ' › product page') }),
         h('div', { class: 'pview-title' }, v.title),
@@ -845,7 +856,7 @@
     const t = turn || addUserTurn(text);
     pendingUser.push({ turn: t, at: Date.now() });
     newAgentTurn();
-    const r = await post('/api/utterance', { session_id: SESSION, text });
+    const r = await post('/api/utterance', { session_id: SESSION, text, mode: MODE });
     if (!r) t.el.classList.add('failed');
   }
 
@@ -937,7 +948,8 @@
       tabindex: '0', role: 'button', 'aria-label': `Option ${i + 1}: ${o.title || o.sku}`,
     },
     h('div', { class: 'pc-img' },
-      o.sku ? h('img', { src: artUrl(o.sku), alt: '' }) : null,
+      o.image_url ? h('img', { class: 'photo', src: o.image_url, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' })
+        : o.sku ? h('img', { src: artUrl(o.sku), alt: '' }) : null,
       badge ? h('span', { class: 'pc-badge' }, badge) : null,
       h('span', { class: 'pc-view' }, h('span', { class: 'dots' }, h('i'), h('i'), h('i')), 'Viewing'),
       h('span', { class: 'pc-pos' }, '#' + ((o.rank && o.rank.position) || i + 1))),
@@ -952,6 +964,9 @@
         r.stars !== undefined && r.stars !== null ? h('span', null, h('span', { class: 'stars', 'aria-hidden': 'true' }, stars(r.stars)), ` ${r.stars}${r.count ? ` (${fmtInt(r.count)})` : ''}`) : null,
         etaIso ? h('span', null, `Arrives ${niceDate(etaIso)}`) : null),
       o.why ? h('div', { class: 'pc-why' }, o.why) : null,
+      o.live ? h('div', { class: 'pc-src' },
+        h('span', null, o.page_source === 'json-ld' ? 'read from the product page' : o.page_source ? 'from the store page' : 'from the store search'),
+        o.url ? h('a', { class: 'pc-link', href: o.url, target: '_blank', rel: 'noopener noreferrer', onclick: (e) => e.stopPropagation() }, 'View in store ↗') : null) : null,
       detail),
     h('div', { class: 'pc-actions' },
       h('button', {
@@ -961,7 +976,7 @@
       h('button', {
         class: 'btn btn-primary', type: 'button',
         onclick: (e) => { e.stopPropagation(); chosen = i; renderCards(); sendText(`Buy the ${ORD[i] || 'first'} one.`); },
-      }, i === chosen ? 'Chosen' : 'Choose this')));
+      }, i === chosen ? 'Chosen' : o.live ? 'Get it' : 'Choose this')));
     const open = () => { if (narrated !== i) sendText(`Show me the ${ORD[i] || 'first'} one.`); };
     card.addEventListener('click', open);
     card.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target === card) { e.preventDefault(); open(); } });
@@ -981,7 +996,9 @@
     if (t.view) { t.view.el.remove(); t.view = null; }
     const grid = h('div', { class: 'cards' });
     const el = h('div', { class: 'cards-wrap' },
-      h('div', { class: 'cards-meta' }, `${options.length} pick${options.length === 1 ? '' : 's'} from your approved stores · tap a card to hear it, or choose one`),
+      h('div', { class: 'cards-meta' }, isLive()
+        ? `${options.length} pick${options.length === 1 ? '' : 's'} from real stores · prices read from the store pages · tap a card to hear it`
+        : `${options.length} pick${options.length === 1 ? '' : 's'} from your approved stores · tap a card to hear it, or choose one`),
       grid);
     t.attach.append(el);
     cardSet = { el, grid };
@@ -1053,27 +1070,32 @@
     if (!p || !el) return;
     const dec = String(p.decision || '').toUpperCase();
     const c = policyFacts(p);
+    const live = Boolean(p.live);
     const rules = Array.isArray(p.rules) ? p.rules : [];
     const lines = rules.map((r) => h('li', { class: DENY_RULES.has(r) ? 'deny' : '' }, ruleText(r, c)));
-    if (!lines.length && dec === 'AUTO_APPROVE') {
+    if (!lines.length && dec === 'AUTO_APPROVE' && live) {
+      lines.push(h('li', { class: 'ok' }, c.limit !== null ? `Price ${money(c.total, c.cur)} is within your ${money(c.limit, c.cur, true)} limit` : 'Within your rules'));
+      if (c.merchant) lines.push(h('li', { class: 'ok' }, `${c.merchant} is one of your allowed stores`));
+    } else if (!lines.length && dec === 'AUTO_APPROVE') {
       lines.push(h('li', { class: 'ok' }, c.limit !== null
         ? `Total ${money(c.total, c.cur)} is within your ${money(c.limit, c.cur, true)} auto-buy limit`
         : 'Within your auto-buy rules'));
       if (c.merchant) lines.push(h('li', { class: 'ok' }, `${c.merchant} is an approved store`));
     }
     const req = dec === 'REQUIRE_APPROVAL';
-    const title = dec === 'AUTO_APPROVE' ? 'Within your rules – buying now' : dec === 'DENY' ? 'Not allowed by your rules' : 'Needs your OK';
-    const sub = [c.merchant, c.version !== null ? `policy v${c.version}` : null,
-      isNum(Number(c.ordersToday)) && c.ordersToday !== null && c.ordersToday !== undefined ? `orders today ${c.ordersToday}${c.maxDay !== null ? '/' + c.maxDay : ''}` : null].filter(Boolean).join(' · ');
+    const title = dec === 'AUTO_APPROVE' ? (live ? 'Within your rules – getting it ready in the store' : 'Within your rules – buying now') : dec === 'DENY' ? 'Not allowed by your rules' : 'Needs your OK';
+    const sub = [c.merchant, c.version !== null ? `policy v${c.version}` : null, live ? 'live web' : null,
+      !live && isNum(Number(c.ordersToday)) && c.ordersToday !== null && c.ordersToday !== undefined ? `orders today ${c.ordersToday}${c.maxDay !== null ? '/' + c.maxDay : ''}` : null].filter(Boolean).join(' · ');
     let foot = null;
     if (req && decision.approval === 'granted') foot = h('div', { class: 'policy-state ok', html: icon('check') + 'Confirmed by you' });
+    else if (live && decision.approval === 'handoff') foot = h('div', { class: 'policy-state ok', html: icon('check') + 'Handed off to the store' });
     else if (req && decision.approval === 'denied') foot = h('div', { class: 'policy-state no' }, 'Not purchased');
     else if (req) {
       foot = [
         h('div', { class: 'policy-actions' },
-          h('button', { class: 'btn btn-primary', type: 'button', disabled: decision.pending, onclick: () => { decision.pending = true; renderPolicyCard(); sendText('Confirm purchase.'); } }, 'Confirm purchase'),
+          h('button', { class: 'btn btn-primary', type: 'button', disabled: decision.pending, onclick: () => { decision.pending = true; renderPolicyCard(); sendText('Confirm purchase.'); } }, live ? 'Confirm' : 'Confirm purchase'),
           h('button', { class: 'btn', type: 'button', disabled: decision.pending, onclick: () => { decision.pending = true; renderPolicyCard(); sendText('Cancel.'); } }, 'Cancel')),
-        h('div', { class: 'policy-hint' }, 'Or say “confirm purchase”. Nothing is bought without it.'),
+        h('div', { class: 'policy-hint' }, live ? 'Or say “confirm”. Shopz never pays – you check out in the store.' : 'Or say “confirm purchase”. Nothing is bought without it.'),
       ];
     }
     el.className = 'icard policy ' + (dec === 'AUTO_APPROVE' ? 'dec-auto' : dec === 'DENY' ? 'dec-deny' : 'dec-req');
@@ -1138,6 +1160,27 @@
     scrollTurns();
   }
 
+  function showHandoffCard(x) {
+    const t = ensureAgentTurn();
+    const ap = x.approval || {};
+    const how = ap.mode === 'user_explicit' ? 'Confirmed by you' : 'Within your rules';
+    t.attach.append(h('div', { class: 'icard handoff' },
+      h('div', { class: 'handoff-head' },
+        h('span', { class: 'order-ico', html: icon('check') }),
+        h('div', null, h('div', { class: 'handoff-title' }, 'Ready to buy'), h('div', { class: 'handoff-sub' }, `${x.store_name || ''} · price and stock just re-checked · ${how}`))),
+      h('div', { class: 'handoff-body' },
+        x.image_url ? h('div', { class: 'handoff-img' }, h('img', { src: x.image_url, alt: '', referrerpolicy: 'no-referrer' })) : null,
+        h('div', { class: 'handoff-facts' },
+          h('div', { class: 't', title: x.title || '' }, x.title || ''),
+          h('div', { class: 'p' }, money(x.price, x.currency || 'USD')),
+          x.variant && x.variant !== 'Default Title' ? h('div', { class: 'handoff-sub' }, x.variant) : null)),
+      h('div', { class: 'handoff-actions' },
+        h('a', { class: 'btn btn-primary', href: x.url, target: '_blank', rel: 'noopener noreferrer', html: 'Open in store ' + icon('out') })),
+      h('div', { class: 'handoff-note' }, 'Shopz never pays and never logs in for you. Checkout, taxes and shipping happen in the store.')));
+    if (decision.policy && decision.policyEl) { decision.approval = decision.approval === 'granted' ? 'granted' : 'handoff'; renderPolicyCard(); }
+    scrollTurns();
+  }
+
   function clearDecision() {
     decision.policy = null;
     decision.approval = null;
@@ -1151,7 +1194,26 @@
     ['Running shoes for a half marathon', 'I need running shoes for a half marathon in three weeks.'],
     ['Reorder my usual coffee', 'Reorder my usual coffee.'],
   ];
+  const LIVE_CHIPS = [
+    ['Running shoes under $150', 'Running shoes under $150.'],
+    ['Wireless headphones under $100', 'Wireless headphones under $100.'],
+    ['Whole bean coffee', 'Whole bean coffee.'],
+    ['Rain jacket, size M', 'A rain jacket in size M.'],
+  ];
   function quickReplies() {
+    if (isLive()) {
+      if (curState === 'APPROVE' && decision.policy && !decision.approval && !decision.pending) return [['Confirm', 'Confirm.', true], ['Cancel', 'Cancel.']];
+      if (options.length && ['AWAIT_CHOICE', 'NARRATE'].includes(curState)) {
+        const i = narrated >= 0 ? narrated : 0;
+        const list = [['Reviews?', 'Show me the reviews.'], ['Shipping?', 'What about shipping?'], ['Return policy', "What's the return policy?"]];
+        if (i < options.length - 1) list.push(['Next option', 'Next one.']);
+        if (i > 0) list.push(['Go back', 'Go back.']);
+        list.push(['Get this one', 'Buy this one.', true]);
+        return list;
+      }
+      if (curState === 'DONE' || curState === 'IDLE') return thread.querySelector('.msg') ? LIVE_CHIPS : [];
+      return [];
+    }
     if (curState === 'APPROVE' && decision.policy && !decision.approval && !decision.pending) {
       return [['Confirm purchase', 'Confirm purchase.', true], ['Cancel', 'Cancel.']];
     }
@@ -1346,6 +1408,12 @@
     memory(d) { memChips = Array.isArray(d.chips) ? d.chips.filter((c) => c && c.label) : []; renderChips(); },
     constraints(d) { conChips = Array.isArray(d.chips) ? d.chips.filter((c) => c && c.label) : []; renderChips(); },
     options(d) {
+      if (d.update && cardSet && cardSet.el.isConnected) {
+        options = Array.isArray(d.options) ? d.options : [];
+        fill(cardSet.el.querySelector('.cards-meta'), `${options.length} pick${options.length === 1 ? '' : 's'} from real stores · prices read from the store pages · tap a card to hear it`);
+        renderCards();
+        return;
+      }
       options = Array.isArray(d.options) ? d.options : [];
       narrated = -1;
       chosen = -1;
@@ -1360,6 +1428,7 @@
       if (d.sku && amount(d.after) !== null) { priceNow[d.sku] = amount(d.after); renderCards(); }
       showPriceCard(d);
     },
+    handoff(d) { showHandoffCard(d.handoff || d); refreshVerify(); renderQuick(); },
     order(d) {
       decision.order = d.order || d;
       showOrderCard(decision.order);
@@ -1383,7 +1452,7 @@
   async function pollLoop() {
     for (;;) {
       try {
-        const r = await fetch('/api/poll?session=' + encodeURIComponent(SESSION) + '&since=' + pollSince, { cache: 'no-store' });
+        const r = await fetch('/api/poll?session=' + encodeURIComponent(SESSION) + '&since=' + pollSince + '&mode=' + encodeURIComponent(MODE), { cache: 'no-store' });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const j = await r.json();
         if (!wasLive) { retry = 0; wasLive = true; setConn('live'); backfillAudit(); refreshVerify(); }
@@ -1403,7 +1472,7 @@
     if (USE_POLL) { pollLoop(); return; }
     clearTimeout(retryTimer);
     if (es) { try { es.close(); } catch { /* ignore */ } }
-    es = new EventSource('/api/events?session=' + encodeURIComponent(SESSION));
+    es = new EventSource('/api/events?session=' + encodeURIComponent(SESSION) + '&mode=' + encodeURIComponent(MODE));
     es.onopen = () => {
       retry = 0;
       wasLive = true;
@@ -1524,7 +1593,60 @@
   $('drawerClose').innerHTML = icon('x');
   $('drawerClose').addEventListener('click', () => setDrawer(false));
   $('scrim').addEventListener('click', () => setDrawer(false));
-  fill($('welcomeChips'), chipButtons(START_CHIPS));
+  /* ------------------------------------------------------------------ mode + allowed stores (live web) */
+  function applyMode() {
+    document.body.classList.toggle('mode-live', isLive());
+    document.querySelectorAll('#modeSwitch button').forEach((b) => {
+      b.classList.toggle('on', b.dataset.mode === MODE);
+      b.setAttribute('aria-pressed', String(b.dataset.mode === MODE));
+    });
+    const badge = $('badge');
+    if (isLive()) {
+      badge.textContent = LIVE_NOTICE;
+      badge.title = 'Real stores, read in real time. Shopz never pays or logs in – you check out in the store.';
+      badge.classList.add('live');
+      $('welcomeText').textContent = 'Talk or type. Shopz searches real stores you allow, reads each product page live and shows every step.';
+      const note = $('liveNote');
+      note.hidden = false;
+      note.textContent = LIVE_NOTICE + '.';
+      $('storesSec').hidden = false;
+      loadStores();
+    }
+    fill($('welcomeChips'), chipButtons(isLive() ? LIVE_CHIPS : START_CHIPS));
+  }
+  document.querySelectorAll('#modeSwitch button').forEach((b) => b.addEventListener('click', () => {
+    if (b.dataset.mode === MODE) return;
+    try { localStorage.setItem('shopz.mode', b.dataset.mode); } catch { /* ignore */ }
+    stopSpeech();
+    const u = new URL(location.href);
+    u.searchParams.delete('mode');
+    location.href = u.pathname + (u.search ? u.search : '') + (u.search ? '&' : '?') + 'mode=' + b.dataset.mode;
+  }));
+  let stores = [];
+  function renderStores() {
+    fill($('storeList'), stores.map((st) => h('label', { class: 'store-row' },
+      h('input', { type: 'checkbox', checked: st.enabled ? '' : null, onchange: (e) => toggleStore(st.host, e.target.checked) }),
+      h('span', { class: 'nm' }, st.name), h('span', { class: 'dom' }, st.label))));
+    stores.forEach((st, i) => { const box = $('storeList').children[i]?.querySelector('input'); if (box) box.checked = Boolean(st.enabled); });
+  }
+  async function loadStores() {
+    try {
+      const r = await fetch('/api/live/shops?session=' + encodeURIComponent(SESSION));
+      stores = (await r.json()).stores || [];
+      renderStores();
+    } catch { /* drawer stays empty */ }
+  }
+  async function toggleStore(host, on) {
+    const r = await post('/api/live/shops', { session_id: SESSION, [on ? 'enable' : 'disable']: [host] });
+    if (r && r.stores) { stores = r.stores; renderStores(); }
+  }
+  $('storeAdd').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const v = $('storeInput').value.trim();
+    if (!v) return;
+    const r = await post('/api/live/shops', { session_id: SESSION, add: v });
+    if (r && r.stores) { stores = r.stores; renderStores(); $('storeInput').value = ''; toast('Store added', 'info', 1800); }
+  });
 
   if (!SR && !(navigator.mediaDevices && window.MediaRecorder)) {
     const hint = $('micHint');
@@ -1538,11 +1660,18 @@
   }
 
   /* ------------------------------------------------------------------ start */
+  async function start() {
+    if (!MODE) {
+      try { const c = await (await fetch('/api/config', { cache: 'no-store' })).json(); MODE = c.default_mode === 'live' ? 'live' : 'demo'; } catch { MODE = 'demo'; }
+    }
+    applyMode();
+    connect();
+  }
   setStep('IDLE');
   renderMute();
   setMicPill();
   setConn('down');
-  connect();
+  start();
   refreshVerify();
   setInterval(refreshVerify, 10000);
 })();

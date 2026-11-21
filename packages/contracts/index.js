@@ -27,10 +27,12 @@ export const AUDIT_TYPES = Object.freeze([
   'answer_not_on_page', 'user_interrupt', 'barge_in', 'injection_ignored', 'option_selected', 'price_observed', 'stock_checked',
   'policy_decision', 'approval_requested', 'approval_granted', 'approval_denied', 'checkout_started', 'checkout_step',
   'order_confirmed', 'error', 'fallback_used',
+  // live web mode: optional web search, and the hand-off to the store's own checkout (never an order by Shopz)
+  'web_search', 'handoff',
 ]);
 
 export const SSE_TYPES = Object.freeze([
-  'state', 'user.utterance', 'agent.say', 'speech.cancel', 'memory', 'constraints', 'options', 'policy', 'price_diff', 'order', 'audit', 'error',
+  'state', 'user.utterance', 'agent.say', 'speech.cancel', 'memory', 'constraints', 'options', 'policy', 'price_diff', 'order', 'audit', 'error', 'handoff',
 ]);
 
 export const POLICY_DECISIONS = Object.freeze(['AUTO_APPROVE', 'REQUIRE_APPROVAL', 'DENY']);

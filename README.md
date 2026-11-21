@@ -70,6 +70,10 @@ curl -s localhost:3000/api/chat -H 'content-type: application/json' \
 | `NOVA_ACT_API_KEY`, `BROWSER_MODE=nova` (the default in `.env.example`) | Amazon Nova Act owns the browser and runs the checkout steps with `act()` | Playwright with scripted clicks; `GET :4100/health` shows `mode` and `fallback_reason` |
 | `MONGODB_URI`, `MONGODB_DB` | MongoDB Atlas: audit events, preferences, orders, and Atlas Vector Search on every product search (after `npm run seed`) | in-memory store + `data/audit-<session>.jsonl`, store API search only |
 | `DEMO_TODAY=YYYY-MM-DD` | freezes "today" for delivery dates | real date |
+| `SHOPZ_MODE=demo\|live` | default mode of the panel (switch in the header, or `?mode=live`) | `demo` |
+| `SHOPZ_LIVE_SHOPS` | comma-separated Shopify store hosts for live mode | built-in start list (12 US stores) |
+| `LIVE_LLM_URL`, `LIVE_LLM_MODEL` | optional local model (Ollama) that narrows free-form requests | regex request parser |
+| `LIVE_SEARCH_URL` | optional SearXNG instance for extra web results on allowed stores | store search only |
 
 Never commit `.env`. It is gitignored.
 
@@ -85,6 +89,16 @@ Never commit `.env`. It is gitignored.
 8. "Reorder my usual coffee." → under the limit at an approved store → bought without asking.
 
 Operator hotkeys in the panel (press `?`): `Shift+P` simulated price change on the first pick, `Shift+R` reset, `M` mute.
+
+## Live mode (real stores)
+
+Switch the header to **Live web** (or open `/?mode=live`). Shopz then searches real Shopify stores in real time:
+
+- Search uses each store's public storefront endpoints (`/search/suggest.json`, `/products/<handle>.js`); product facts come from the product page itself (schema.org JSON-LD and OpenGraph). Every page read is hashed into the audit chain.
+- Questions are answered only from the page. If the page does not say, Shopz says so.
+- Shopz never pays in live mode. It goes as far as "ready to buy", re-checks price and stock, applies your policy, then hands off with an **Open in store** link (`handoff` event). Checkout happens in the store.
+- Polite fetching: an honest user agent, robots.txt respected, one request per store per step, a cool-down after HTTP 429, 12 s per page. Stores behind a captcha are skipped, not worked around. Only public https hosts are fetched (private addresses and redirects into them are refused).
+- The allowed-stores list is visible and editable in the drawer. A new store is probed before it is accepted.
 
 ## Trust design
 
